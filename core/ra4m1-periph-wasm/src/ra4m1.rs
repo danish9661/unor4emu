@@ -339,4 +339,34 @@ mod tests {
         sys.p.write(sys, ACMPLP_BASE + 0x10, 4, 0x100);
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 0);
     }
+
+    #[test]
+    fn ra4m1_arduino_blink_boots() {
+        // Real ArduinoCore-renesas Blink.ino built with arduino-cli
+        // (fqbn arduino:renesas_uno:minima), vendored at core/blinky/r4blink.bin.
+        // The Minima bootloader lives at 0x0000-0x3FFF; the app links at 0x4000
+        // (see .hex addresses), so the raw .bin loads at APP_BASE like the
+        // bootloader's jump does.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4blink.bin");
+        assert!(bin.len() >= 8);
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        crate::system::get_uart_output().lock().unwrap().clear();
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = false;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 500_000);
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(mem.bad.get(), None, "bad access");
+        // Reset_Handler ran: PUSH+BL+branch past boot into setup/loop.
+        let pc_now = cpu.regs.r[15] & !1;
+        assert!(pc_now > 0x4000 && pc_now < 0x40000, "pc={:08x}", pc_now);
+    }
 }

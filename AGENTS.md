@@ -7,7 +7,7 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 134) and `cargo build` green in the
+  `core/ra4m1-periph-wasm` (currently 144) and `cargo build` green in the
   top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -97,6 +97,24 @@ wasm wrappers can path-depend on it).
 
 `ra4m1_boots_from_zero`, `clock_stub_accepts_boot_writes`,
 `ra4m1_map_sci_tx_reaches_console`, `ra4m1_map_gpt_counts_and_matches`,
-`ra4m1_map_port_output_retained`, `ra4m1_firmware_blinky_via_mmio`.
+`ra4m1_map_port_output_retained`, `ra4m1_firmware_blinky_via_mmio`,
+`ra4m1_map_adc_converts_channel`, `ra4m1_map_dac_output_retained`,
+`ra4m1_map_rtc_ticks_seconds`, `ra4m1_map_dmac_mem_to_mem`,
+`ra4m1_map_elc_routes_software_event`, `ra4m1_map_agt_counts`,
+`ra4m1_map_crc_and_doc`, `ra4m1_map_sci_echo_path`,
+`ra4m1_map_opamp_follower_and_acmp`, `ra4m1_arduino_blink_boots`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
+
+## 7. Arduino firmware (arduino-cli, Renesas core 1.6.0)
+
+```bash
+arduino-cli compile --fqbn arduino:renesas_uno:minima --output-dir /tmp/r4build /tmp/r4blink
+```
+
+The Minima bootloader occupies `0x0000-0x3FFF`; the app links at `0x4000`
+(see `.hex` record addresses). The raw `.bin` is the app image, so the
+emulator loads it at `APP_BASE=0x4000` and boots from that table - loading
+at zero executes shifted garbage (looks plausible, faults in an epilogue).
+`core/blinky/r4blink.bin` is the vendored Blink build the boot test runs
+(500k instructions, no fault, PC in app region).
