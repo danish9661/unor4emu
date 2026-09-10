@@ -1,4 +1,4 @@
 [workspace]
-members = ["wasm-minima", "crates/wifi-link"]
+members = ["wasm-minima", "crates/wifi-link", "core/ra4m1-core"]
 exclude = ["core/ra4m1-periph-wasm", "wasm-wifi"]
 resolver = "2"

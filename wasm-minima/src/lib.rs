@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
-use ra4m1_periph_wasm::{WasmCpu, ra4m1::{FLASH_BASE}};
+use ra4m1_core::{WasmCpu, ra4m1::FLASH_BASE};
 
-// Small WASM: RA4M1 Minima only. No ESP32 code linked.
+// Small WASM: RA4M1 Minima only. No STM32 and no ESP32 code linked.
 #[wasm_bindgen]
 pub struct UnoR4Minima {
     inner: WasmCpu,
@@ -15,7 +15,7 @@ impl UnoR4Minima {
     }
 
     pub fn init_system() {
-        ra4m1_periph_wasm::init_ra4m1();
+        ra4m1_core::init_ra4m1();
     }
 
     pub fn load_firmware(&mut self, data: &[u8]) {

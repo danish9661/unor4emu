@@ -80,15 +80,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
-name = "uno-r4-minima-wasm"
-version = "0.1.0"
-dependencies = [
- "ra4m1-core",
- "wasm-bindgen",
- "wifi-link",
-]
-
-[[package]]
 name = "wasm-bindgen"
 version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -132,7 +123,3 @@ checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "wifi-link"
-version = "0.1.0"

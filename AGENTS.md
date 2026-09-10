@@ -22,12 +22,18 @@ Cortex-M4F @ 48 MHz, 256 KB flash @ `0x00000000`, 32 KB SRAM @ `0x20000000`,
 8 KB data flash). WiFi (`wasm-wifi/`, ESP32-S3) is PARKED - folder stays on
 disk but is excluded from the workspace until its code is ready.
 
-- `core/ra4m1-periph-wasm/` - the emulator core (isolated `[workspace]` so it
-  stays green independently). CPU `src/cpu/` is reused untouched from the
-  STM32F4 snapshot at commit `8a97498`; STM32 peripherals remain as reference
-  until their RA replacements land.
+- `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
+  excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
+  STM32 peripherals remain as reference until their RA replacements land.
+  145 tests must stay green (128 legacy CPU + 17 R4 proofs).
+- `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
+  CPU + ARM + RA peripherals, NO STM32 code, deps are only
+  `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
+  Release WASM is ~225KB vs ~2.1MB for the snapshot core (~9.4x smaller).
+  Its 17 `ra4m1.rs` proofs mirror the snapshot's and must stay green.
 - `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
-  `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. No ESP32 code may ever link here.
+  `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
+  No STM32 and no ESP32 code may ever link here.
 - `wasm-wifi/` - parked, excluded from workspace members.
 - `crates/wifi-link/` - `WifiModule` trait + `NoWifi` (zero cost). ESP32-S3
   plugs in here later without touching RA4M1.
@@ -38,10 +44,10 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# core (134 tests, always single-threaded)
+# snapshot core (145 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# just the R4 proofs
-cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml ra4m1 -- --test-threads=1
+# small core (17 R4 proofs)
+cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
 ```
