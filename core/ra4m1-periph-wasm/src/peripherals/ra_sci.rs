@@ -1,41 +1,44 @@
 use crate::system::{System, get_uart_output};
 use super::Peripheral;
 
-// RA4M1 SCI (UART mode). Real bases: SCI0 0x40118000 + ch*0x100.
+// RA4M1 SCI (UART mode). Real bases: SCI0 0x40070000, stride 0x20;
+// channels 0,1,2,9 (BSP_FEATURE_SCI_CHANNELS=0x207).
 // Real byte-packed registers: SMR+0x00, BRR+0x01, SCR+0x02, TDR+0x03,
 // SSR+0x04, RDR+0x05, SEMR+0x07. Byte-exact via write_sized.
 // TX: TDR write -> console + SSR TDRE/TEND stay set. RX: inject via rx_byte.
-pub const SCI_BASE: u32 = 0x4011_8000;
+// IRQs use ICU event routing (ELC_EVENT_SCI*_RXI/TXI).
+pub const SCI_BASE: u32 = 0x4007_0000; // ch stride 0x20
 
 /// Test/driver helper: inject one RX byte into the SCI at `base`.
 pub fn sci_rx_inject(sys: &crate::system::System, base: u32, b: u8) -> bool {
     sys.p.rx_byte(sys, base, b)
 }
 
-fn sci_irq(ch: u8) -> (i32, i32) {
-    match ch {
-        0 => (40, 41),
-        1 => (42, 43),
-        2 => (44, 45),
-        3 => (46, 47),
-        _ => (40, 41),
+fn sci_events(hw_ch: u8) -> (u32, u32) {
+    // ELC event numbers (bsp_elc.h): RXI/TXI per channel.
+    match hw_ch {
+        0 => (152, 153),
+        1 => (158, 159),
+        2 => (163, 164),
+        9 => (168, 169),
+        _ => (152, 153),
     }
 }
 
 pub struct RaSci {
-    regs: [u8; 0x20],
+    regs: [u8; 0x40],
     rx_buf: Vec<u8>,
-    rxi_irq: i32, txi_irq: i32,
+    rxi_event: u32, txi_event: u32,
 }
 
 impl RaSci {
-    pub fn new(ch: u8) -> Option<Box<dyn Peripheral>> {
-        let (rxi, txi) = sci_irq(ch);
-        let mut regs = [0u8; 0x20];
+    pub fn new(hw_ch: u8) -> Option<Box<dyn Peripheral>> {
+        let (rxi, txi) = sci_events(hw_ch);
+        let mut regs = [0u8; 0x40];
         regs[0x01] = 0xFF; // BRR reset
         regs[0x03] = 0xFF; // TDR reset
         regs[0x04] = 0x84; // SSR TDRE+TEND
-        Some(Box::new(Self { regs, rx_buf: Vec::new(), rxi_irq: rxi, txi_irq: txi }))
+        Some(Box::new(Self { regs, rx_buf: Vec::new(), rxi_event: rxi, txi_event: txi }))
     }
 
     fn scr(&self) -> u8 { self.regs[0x02] }
@@ -43,11 +46,12 @@ impl RaSci {
     fn set_ssr(&mut self, v: u8) { self.regs[0x04] = v; }
 
     fn update_irq(&self, sys: &System) {
+        // RIE + RDRF -> RXI, TIE + TDRE -> TXI, via ICU routing.
         if self.scr() & (1 << 6) != 0 && self.ssr() & (1 << 6) != 0 {
-            sys.p.nvic.borrow_mut().set_intr_pending(self.rxi_irq);
+            crate::system::icu_raise_event(sys, self.rxi_event);
         }
         if self.scr() & (1 << 7) != 0 && self.ssr() & (1 << 7) != 0 {
-            sys.p.nvic.borrow_mut().set_intr_pending(self.txi_irq);
+            crate::system::icu_raise_event(sys, self.txi_event);
         }
     }
 

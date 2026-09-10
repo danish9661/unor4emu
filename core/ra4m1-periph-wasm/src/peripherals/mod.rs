@@ -46,6 +46,8 @@ pub mod ra_rtc;
 pub mod ra_dma;
 pub mod ra_misc;
 pub mod ra_opamp;
+pub mod ra_usb;
+pub mod ra_icu;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -609,49 +611,47 @@ impl Peripherals {
         if let Some(x) = Demcr::new("DEMCR") { add(0xE000_EDFC, 0xE000_EE00, x); }
         if let Some(x) = Stir::new("STIR") { add(0xE000_EF00, 0xE000_EF04, x); }
         if let Some(x) = Itm::new("ITM") { add(0xE000_0000, 0xE000_0F00, x); }
-        // RA SYSTEM + MSTP
-        if let Some(x) = ra_system::RaSystem::new_sysc() { add(0x4001_E000, 0x4001_E200, x); }
-        if let Some(x) = ra_system::RaSystem::new_mstp() { add(0x4008_4000, 0x4008_4200, x); }
-        // RA PORT + PFS
-        if let Some(x) = ra_port::RaPort::new_port() { add(0x4008_0000, 0x4008_0200, x); }
-        if let Some(x) = ra_port::RaPort::new_pfs() { add(0x4008_0800, 0x4008_0D10, x); }
-        // RA SCI0-3
-        for ch in 0..4u8 {
-            if let Some(x) = ra_sci::RaSci::new(ch) {
-                add(0x4011_8000 + (ch as u32) * 0x100, 0x4011_8000 + (ch as u32) * 0x100 + 0x20, x);
+        // RA SYSTEM + MSTP (full blocks: SYSC regs reach +0xF00, e.g. VBTSR;
+        // MSTP base is 0x40046FFC so MSTPCRB lands at 0x40047000)
+        if let Some(x) = ra_system::RaSystem::new_sysc() { add(0x4001_E000, 0x4001_F000, x); }
+        if let Some(x) = ra_system::RaSystem::new_mstp() { add(0x4004_6FFC, 0x4004_8000, x); }
+        // RA PORT + PFS (+PMISC tail)
+        if let Some(x) = ra_port::RaPort::new_port() { add(0x4004_0000, 0x4004_0200, x); }
+        if let Some(x) = ra_port::RaPort::new_pfs() { add(0x4004_0800, 0x4004_0E00, x); }
+        // RA SCI0,1,2,9 (BSP_FEATURE_SCI_CHANNELS=0x207, stride 0x20)
+        for hw in [0u8, 1, 2, 9] {
+            if let Some(x) = ra_sci::RaSci::new(hw) {
+                add(0x4007_0000 + (hw as u32) * 0x20, 0x4007_0000 + (hw as u32) * 0x20 + 0x20, x);
             }
         }
-        // RA GPT: 2x32-bit + 6x16-bit
+        // RA GPT0-7: 2x32-bit + 6x16-bit (stride 0x100)
         for ch in 0..8u8 {
             if let Some(x) = ra_gpt::RaGpt::new(ch) {
-                let base = if ch < 2 { 0x4016_9000 + (ch as u32) * 0x100 }
-                           else { 0x4016_9400 + ((ch - 2) as u32) * 0x100 };
-                add(base, base + 0x40, x);
+                let base = 0x4007_8000 + (ch as u32) * 0x100;
+                add(base, base + 0x100, x);
             }
         }
-        // RA ICU stub (accept-and-retain so FSP init passes)
-        if let Some(x) = ra_system::RaSystem::new_sysc() { add(0x4000_6000, 0x4000_6200, x); }
-        // RA ADC14 + DAC12 + RTC
-        if let Some(x) = ra_analog::RaAdc::new() { add(0x4017_0000, 0x4017_0200, x); }
-        if let Some(x) = ra_analog::RaDac::new() { add(0x4017_1000, 0x4017_1100, x); }
-        if let Some(x) = ra_rtc::RaRtc::new() { add(0x4008_3000, 0x4008_3200, x); }
-        // RA DMAC + DTC + ELC + AGT + WDT/IWDT + CRC + DOC
+        // RA ICU (IELSR event routing) replaces the old accept stub.
+        if let Some(x) = ra_icu::RaIcu::new() { add(0x4000_6000, 0x4000_6400, x); }
+        // RA ADC0/ADC1 + DAC + RTC
+        if let Some(x) = ra_analog::RaAdc::new() { add(0x4005_C000, 0x4005_C200, x); }
+        if let Some(x) = ra_analog::RaAdc::new() { add(0x4005_C200, 0x4005_C400, x); }
+        if let Some(x) = ra_analog::RaDac::new() { add(0x4005_E000, 0x4005_E100, x); }
+        if let Some(x) = ra_rtc::RaRtc::new() { add(0x4004_4000, 0x4004_4200, x); }
+        // RA DMAC + DTC + ELC + AGT0-1 + WDT/IWDT + CRC + DOC
         if let Some(x) = ra_dma::RaDmac::new_dmac() { add(0x4000_5000, 0x4000_5100, x); }
         if let Some(x) = ra_dma::RaDmac::new_dtc() { add(0x4000_5400, 0x4000_5500, x); }
-        if let Some(x) = ra_misc::RaElc::new() { add(0x4008_2000, 0x4008_2100, x); }
-        if let Some(x) = ra_misc::RaAgt::new() { add(0x400E_8000, 0x400E_8100, x); }
-        if let Some(x) = ra_misc::RaAgt::new() { add(0x400E_8100, 0x400E_8200, x); }
-        if let Some(x) = ra_misc::RaWdt::new() { add(0x4008_3400, 0x4008_3500, x); }
-        if let Some(x) = ra_misc::RaWdt::new() { add(0x4008_3200, 0x4008_3300, x); }
-        if let Some(x) = ra_misc::RaCrc::new() { add(0x4010_8000, 0x4010_8100, x); }
-        if let Some(x) = ra_misc::RaDoc::new() { add(0x4010_9000, 0x4010_9100, x); }
-        // RA OPAMP x4 + ACMPLP
-        for ch in 0..4u8 {
-            if let Some(x) = ra_opamp::RaOpamp::new(ch) {
-                let b = 0x4008_5000 + (ch as u32) * 0x100;
-                add(b, b + 0x20, x);
-            }
-        }
+        if let Some(x) = ra_misc::RaElc::new() { add(0x4004_1000, 0x4004_1300, x); }
+        if let Some(x) = ra_misc::RaAgt::new_ch(0) { add(0x4008_4000, 0x4008_4100, x); }
+        if let Some(x) = ra_misc::RaAgt::new_ch(1) { add(0x4008_4100, 0x4008_4200, x); }
+        if let Some(x) = ra_misc::RaWdt::new() { add(0x4004_4200, 0x4004_4300, x); }
+        if let Some(x) = ra_misc::RaWdt::new() { add(0x4004_4400, 0x4004_4500, x); }
+        if let Some(x) = ra_misc::RaCrc::new() { add(0x4007_4000, 0x4007_4100, x); }
+        if let Some(x) = ra_misc::RaDoc::new() { add(0x4005_4100, 0x4005_4200, x); }
+        // RA USBFS (TinyUSB dcd sequences need sticky registers)
+        if let Some(x) = ra_usb::RaUsb::new() { add(0x4009_0000, 0x4009_1000, x); }
+        // RA OPAMP (single block) + ACMPLP
+        if let Some(x) = ra_opamp::RaOpamp::new() { add(0x4008_6000, 0x4008_6100, x); }
         if let Some(x) = ra_opamp::RaAcmplp::new() { add(0x4008_5E00, 0x4008_5F00, x); }
         p.finish_registration();
         p

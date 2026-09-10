@@ -1781,7 +1781,13 @@ pub fn exec32(
                     // (masking to NZCVQ hid GE and made UADD8/USUB8 look
                     // broken when only the READ was — fuzz-found).
                     0 | 1 | 2 => cpu.regs.xpsr & 0xF80F0000,
-                3 => cpu.regs.xpsr,                     // XPSR
+                    // MRS PSR/XPSR returns the COMBINED xPSR: flags + live
+                    // exception number in IPSR[8:0] (IT state lives in
+                    // it_cond/it_mask, so xpsr[8:0] is free for this).
+                    // Without the live IPSR, FSP's R_FSP_CurrentIrqGet
+                    // (mrs PSR) always saw handler 0 and routed every IRQ
+                    // to the wrong control block (found via Arduino AGT).
+                    3 => cpu.regs.xpsr | (cpu.ipsr & 0x1FF),
                 5 => cpu.ipsr,                          // IPSR (live exception number)
                 6 | 7 => cpu.regs.xpsr & 0x0700FC00,    // EPSR/IEPSR
                 8 => cpu.read_msp(),

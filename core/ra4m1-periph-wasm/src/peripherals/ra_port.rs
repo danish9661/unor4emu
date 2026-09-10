@@ -1,15 +1,17 @@
 use crate::system::System;
 use super::Peripheral;
 
-// RA4M1 PORT + PFS (real bases, RA family).
-// PORTn 0x40080000 + n*0x20 (PCNTR1/2/3), PFS 0x40080800, PMISC 0x40080D00.
-// MVP: model PDR/PODR/PIDR + output tracking for LED matrix / Arduino D0-D13.
-// PFS writes retained (pin function), reads return what was written.
-pub const PORT_BASE: u32 = 0x4008_0000;
-pub const PFS_BASE: u32 = 0x4008_0800;
+// RA4M1 PORT+PFS (real bases: PORTn 0x40040000+n*0x20, PFS 0x40040800).
+// Real per-port layout: PCNTR1+0x00 (PODR+PDR), PCNTR2+0x04 (EIDR+PIDR, RO),
+// PCNTR3+0x08 (PORR set + POSR reset, WO), PCNTR4+0x0C (EORR+EOSR, WO).
+// FSP digitalWrite uses PORR/POSR, so byte-exact write_sized is required:
+// the bus merges sub-word stores into the aligned word and this model
+// applies only the targeted bytes (a merged PORR write must NOT clobber
+// PCNTR1 like a plain word store would).
+pub const PORT_BASE: u32 = 0x4004_0000;
+pub const PFS_BASE: u32 = 0x4004_0800;
 
 pub struct RaPort {
-    // per-port: PDR (direction), PODR (output), PIDR (input external)
     pdr: [u16; 12],
     podr: [u16; 12],
     pidr: [u16; 12],
@@ -45,38 +47,71 @@ impl RaPort {
 impl Peripheral for RaPort {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
-        // PORT slot layout: per port n at +n*0x20: +0x00 PCNTR1(PDR+PODR), +0x02 EORR, +0x04 PORR...
-        // MVP: decode port index + register.
         // PFS slot: flat retain map.
-        if offset >= 0x800 && offset < 0xD00 {
-            // PFS area when this instance serves PFS slot (offset relative to PFS_BASE)
+        if offset >= 0x800 {
             return *self.pfs.get(&offset).unwrap_or(&0);
         }
         let port = (offset / 0x20) as usize;
-        let reg = offset % 0x20;
+        let reg = (offset & !3) % 0x20;
         if port >= 12 { return 0; }
         match reg {
             0x00 => ((self.pdr[port] as u32) << 16) | (self.podr[port] as u32),
             0x04 => self.pidr[port] as u32,
-            _ => *self.pfs.get(&offset).unwrap_or(&0),
+            // WO registers read 0.
+            _ => 0,
         }
     }
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
-        if offset >= 0x800 && offset < 0x1000 {
-            self.pfs.insert(offset, value);
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
+        self.write_sized(sys, offset, value, 0, 4);
+    }
+    fn write_sized(&mut self, _sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        if offset >= 0x800 {
+            // PFS slot: retain merged word.
+            if byte_offset == 0 && size == 4 {
+                self.pfs.insert(offset, value);
+            } else {
+                let mut cur = self.pfs.get(&offset).copied().unwrap_or(0).to_le_bytes();
+                for i in 0..size as usize {
+                    if byte_offset as usize + i >= 4 { continue; }
+                    cur[byte_offset as usize + i] =
+                        ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
+                }
+                self.pfs.insert(offset, u32::from_le_bytes(cur));
+            }
             return;
         }
         let port = (offset / 0x20) as usize;
-        let reg = offset % 0x20;
         if port >= 12 { return; }
-        match reg {
-            0x00 => {
-                self.pdr[port] = (value >> 16) as u16;
-                self.podr[port] = (value & 0xFFFF) as u16;
+        let base = (offset & !3) as usize % 0x20;
+        for i in 0..size as usize {
+            if byte_offset as usize + i >= 4 { continue; }
+            let reg = base + byte_offset as usize + i;
+            let v = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
+            match reg {
+                0x00 | 0x01 => {
+                    let mut cur = self.podr[port].to_le_bytes();
+                    cur[reg] = v;
+                    self.podr[port] = u16::from_le_bytes(cur);
+                }
+                0x02 | 0x03 => {
+                    let mut cur = self.pdr[port].to_le_bytes();
+                    cur[reg - 0x02] = v;
+                    self.pdr[port] = u16::from_le_bytes(cur);
+                }
+                // PCNTR2 (PIDR/EIDR) is read-only: ignore.
+                0x04..=0x07 => {}
+                // PORR/EORR: set PODR bits.
+                0x08 | 0x09 | 0x0C | 0x0D => {
+                    let sh = ((reg % 4) * 8) as u16;
+                    self.podr[port] |= (v as u16) << sh;
+                }
+                // POSR/EOSR: clear PODR bits.
+                0x0A | 0x0B | 0x0E | 0x0F => {
+                    let bit = (reg - if reg < 0x0C { 0x0A } else { 0x0E }) * 8;
+                    self.podr[port] &= !((v as u16) << bit);
+                }
+                _ => {}
             }
-            0x02 => self.podr[port] |= (value & 0xFFFF) as u16,   // EORR set bits
-            0x04 => self.podr[port] &= !(value as u16),           // PORR clear bits
-            _ => { self.pfs.insert(offset, value); }
         }
     }
 }

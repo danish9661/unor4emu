@@ -7,7 +7,7 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 144) and `cargo build` green in the
+  `core/ra4m1-periph-wasm` (currently 145) and `cargo build` green in the
   top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -49,19 +49,26 @@ cargo build --manifest-path Cargo.toml
 `core/ra4m1-periph-wasm` needs `crate-type = ["cdylib","rlib"]` (rlib so the
 wasm wrappers can path-depend on it).
 
-## 3. RA4M1 map (real bases, via FSP base_addresses.h)
+## 3. RA4M1 map (real bases, via FSP R7FA4M1AB.h - NOT RA6!)
 
 | Block | Base | Model |
 |---|---|---|
 | SYSC | `0x4001_E000` | `ra_system.rs` accept-and-retain, erased reads `0xFFFFFFFF` |
-| MSTP | `0x4008_4000` | same model, own slot |
+| MSTP | `0x4004_6FFC` | same model, own slot (MSTPCRB @ `0x4004_7000`) |
 | ICU | `0x4000_6000` | stub (same model) |
-| ELC | `0x4008_2000` | stub |
-| PORT0.. | `0x4008_0000`+n*`0x20` | `ra_port.rs` PDR/PODR/PIDR + EORR/PORR |
-| PFS | `0x4008_0800` | retain map |
-| SCI0-3 | `0x4011_8000`+ch*`0x100` | `ra_sci.rs` byte-exact UART |
-| GPT320-321 | `0x4016_9000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven |
-| GPT164-169 | `0x4016_9400`+(ch-2)*`0x100` | same model, 16-bit mask |
+| PORT0.. | `0x4004_0000`+n*`0x20` | `ra_port.rs` PDR/PODR/PIDR + EORR/PORR |
+| PFS | `0x4004_0800` | retain map |
+| ELC | `0x4004_1000` | `ra_misc.rs` routing table + soft trigger |
+| RTC | `0x4004_4000` | `ra_rtc.rs` instruction-count seconds |
+| WDT/IWDT | `0x4004_4200`/`0x4004_4400` | `ra_misc.rs` + shared reset flags |
+| DMAC/DTC | `0x4000_5000`/`0x4000_5400` | `ra_dma.rs` queues shared sync-memcopy path |
+| DOC/ADC/DAC | `0x4005_4100`/`0x4005_C000`/`0x4005_E000` | `ra_misc.rs`/`ra_analog.rs` |
+| SCI0-3 | `0x4007_0000`+ch*`0x20` | `ra_sci.rs` byte-exact UART |
+| CRC | `0x4007_4000` | `ra_misc.rs` IEEE-802.3 |
+| GPT0-7 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven (0-1: 32-bit) |
+| AGT0-1 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` 16-bit count |
+| ACMPLP/OPAMP | `0x4008_5E00`/`0x4008_6000` | `ra_opamp.rs` loopback + compare |
+| USBFS | `0x4009_0000` | `ra_usb.rs` retain file (endpoints later) |
 | ARM | `0xE000_xxxx` | reuse NVIC/SysTick/SCB/MPU/FPU/DWT/STIR/ITM |
 
 `Peripherals::new_ra4m1()` builds this map. `WasmSystem::new_ra4m1()` +
@@ -84,12 +91,21 @@ wasm wrappers can path-depend on it).
 
 ## 5. Peripheral status
 
-- DONE: SYSTEM/MSTP/ICU/ELC stubs, PORT+PFS, SCI UART (TX console, RX inject,
-  TXI/RXI IRQs), GPT (count/compare/IRQ), `ra4m1_memory()` flash-at-zero,
-  `WasmCpu::new_ra4m1()`, firmware test printing `H` + LED on.
-- NEXT: ADC14 + DAC12 + RTC + DMAC/DTC (mem-to-mem first) + ELC routing table,
-  then WDT/IWDT + CRC + DOC + OPAMP/ACMP. Defer CTSU/USBFS/CAN. LED matrix
-  (WiFi board) renders from RA GPIO pins, not as a peripheral.
+- DONE: SYSTEM/MSTP/ICU(+IELSR routing)/ELC stubs, PORT+PFS (real PCNTR
+  layout), SCI UART (TX console, RX inject, TXI/RXI events), GPT
+  (count/compare/event), ADC14 (ADST=bit15, HW-cleared), DAC12, RTC,
+  DMAC/DTC memcopy, AGT down-counter (latched reload, TUNDF, underflow
+  events), WDT/IWDT, CRC, DOC, OPAMP/ACMP, USBFS retain file,
+  `ra4m1_memory()` flash-at-zero, `WasmCpu::new_ra4m1()`, Arduino Blink
+  boots AND toggles the LED (AGT0 1ms IRQs drive millis).
+- Hard-won truths: RA4M1 bases differ from RA6 everywhere (this §3 is from
+  R7FA4M1AB.h, never assume); SYSC OPCCR resets 0x00 with timed TSF;
+  AGT reload latches the programmed counter (AGTCMA untouched when output
+  support is off); AGT flag bits clear-by-0 (start value 0xF1 keeps it
+  running); `MRS PSR` must include live IPSR or FSP routes every IRQ wrong
+  (fixed in snapshot thumb.rs - report upstream with the other CPU bugs).
+- NEXT: native USB-Serial (endpoints), CTSU, CAN. LED matrix (WiFi board)
+  renders from RA GPIO pins, not as a peripheral.
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
 
@@ -102,7 +118,8 @@ wasm wrappers can path-depend on it).
 `ra4m1_map_rtc_ticks_seconds`, `ra4m1_map_dmac_mem_to_mem`,
 `ra4m1_map_elc_routes_software_event`, `ra4m1_map_agt_counts`,
 `ra4m1_map_crc_and_doc`, `ra4m1_map_sci_echo_path`,
-`ra4m1_map_opamp_follower_and_acmp`, `ra4m1_arduino_blink_boots`.
+`ra4m1_map_opamp_follower_and_acmp`, `ra4m1_arduino_blink_boots`,
+`ra4m1_arduino_blink_toggles_led`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
 

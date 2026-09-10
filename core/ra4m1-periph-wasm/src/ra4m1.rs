@@ -11,20 +11,20 @@ pub const RAM_BASE: u32 = 0x20000000;
 pub const RAM_SIZE: usize = 32 * 1024;
 pub const DATAFLASH_SIZE: usize = 8 * 1024;
 
-pub const SCI0_BASE: u32 = 0x4011_8000;
-pub const GPT320_BASE: u32 = 0x4016_9000;
-pub const PORT_BASE: u32 = 0x4008_0000;
-pub const PFS_BASE: u32 = 0x4008_0800;
+pub const SCI0_BASE: u32 = 0x4007_0000;
+pub const GPT0_BASE: u32 = 0x4007_8000;
+pub const PORT_BASE: u32 = 0x4004_0000;
+pub const PFS_BASE: u32 = 0x4004_0800;
 pub const SYSC_BASE: u32 = 0x4001_E000;
-pub const ADC_BASE: u32 = 0x4017_0000;
-pub const DAC_BASE: u32 = 0x4017_1000;
-pub const RTC_BASE: u32 = 0x4008_3000;
+pub const ADC_BASE: u32 = 0x4005_C000;
+pub const DAC_BASE: u32 = 0x4005_E000;
+pub const RTC_BASE: u32 = 0x4004_4000;
 pub const DMAC_BASE: u32 = 0x4000_5000;
-pub const ELC_BASE: u32 = 0x4008_2000;
-pub const AGT0_BASE: u32 = 0x400E_8000;
-pub const CRC_BASE: u32 = 0x4010_8000;
-pub const DOC_BASE: u32 = 0x4010_9000;
-pub const OPAMP_BASE: u32 = 0x4008_5000;
+pub const ELC_BASE: u32 = 0x4004_1000;
+pub const AGT0_BASE: u32 = 0x4008_4000;
+pub const CRC_BASE: u32 = 0x4007_4000;
+pub const DOC_BASE: u32 = 0x4005_4100;
+pub const OPAMP_BASE: u32 = 0x4008_6000;
 pub const ACMPLP_BASE: u32 = 0x4008_5E00;
 
 /// Make a FlatMemory wired for RA4M1 (flash at zero).
@@ -124,12 +124,12 @@ mod tests {
         crate::init_for_test(sys);
         let sys = crate::sys();
         // Period 100, start.
-        sys.p.write(sys, GPT320_BASE + 0x08, 4, 100);
-        sys.p.write(sys, GPT320_BASE + 0x00, 4, 1);
+        sys.p.write(sys, GPT0_BASE + 0x08, 4, 100);
+        sys.p.write(sys, GPT0_BASE + 0x00, 4, 1);
         // Advance virtual clock and tick.
         crate::system::INSTRUCTION_COUNT.fetch_add(50, std::sync::atomic::Ordering::Relaxed);
         sys.tick();
-        let cnt = sys.p.read(sys, GPT320_BASE + 0x04, 4);
+        let cnt = sys.p.read(sys, GPT0_BASE + 0x04, 4);
         assert!(cnt > 0 && cnt <= 100, "cnt={}", cnt);
     }
 
@@ -211,7 +211,7 @@ mod tests {
         crate::system::adc_set_override("ADC0", 2, 0xABC);
         let sys = crate::sys();
         sys.p.write(sys, ADC_BASE + 0x04, 4, 1 << 2); // select ch2
-        sys.p.write(sys, ADC_BASE + 0x00, 4, 1 << 7); // ADST start
+        sys.p.write(sys, ADC_BASE + 0x00, 4, 1 << 15); // ADST start
         let v = sys.p.read(sys, ADC_BASE + 0x20 + 2 * 2, 4);
         assert_eq!(v & 0x3FFF, 0xABC, "ch2 v={:x}", v);
         crate::system::adc_clear_override("ADC0", 2);
@@ -282,12 +282,14 @@ mod tests {
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
         let sys = crate::sys();
-        sys.p.write(sys, AGT0_BASE + 0x08, 4, 1000);
-        sys.p.write(sys, AGT0_BASE + 0x00, 4, 1);
+        sys.p.write(sys, AGT0_BASE + 0x00, 2, 1000); // AGT counter program (latches reload)
+        sys.p.write(sys, AGT0_BASE + 0x08, 1, 1);    // AGTCR.TSTART
         crate::system::INSTRUCTION_COUNT.fetch_add(100, std::sync::atomic::Ordering::Relaxed);
         sys.tick();
-        let cnt = sys.p.read(sys, AGT0_BASE + 0x04, 4);
-        assert!(cnt > 0 && cnt <= 1000, "cnt={}", cnt);
+        let cnt = sys.p.read(sys, AGT0_BASE + 0x00, 2) & 0xFFFF; // AGT counter
+        assert!(cnt > 0 && cnt < 1000, "cnt={}", cnt);
+        // TCSTF follows TSTART.
+        assert_eq!(sys.p.read(sys, AGT0_BASE + 0x08, 1) & 0x03, 0x03);
     }
 
     #[test]
@@ -329,9 +331,10 @@ mod tests {
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
         let sys = crate::sys();
-        sys.p.write(sys, OPAMP_BASE + 0x10, 4, 0xABC); // poke IN_P ch0
-        sys.p.write(sys, OPAMP_BASE + 0x00, 4, 0x01);  // enable
-        assert_eq!(sys.p.read(sys, OPAMP_BASE + 0x04, 4), 0xABC);
+        sys.p.write(sys, OPAMP_BASE + 0x20, 4, 0xABC); // poke ch0 input
+        sys.p.write(sys, OPAMP_BASE + 0x0B, 1, 0x01);  // AMPC: enable ch0
+        assert_eq!(sys.p.read(sys, OPAMP_BASE + 0x30, 4) & 0xFFF, 0xABC);
+        assert_eq!(sys.p.read(sys, OPAMP_BASE + 0x0C, 1) & 1, 1); // AMPMON0
         sys.p.write(sys, ACMPLP_BASE + 0x10, 4, 0x800);
         sys.p.write(sys, ACMPLP_BASE + 0x14, 4, 0x400);
         sys.p.write(sys, ACMPLP_BASE + 0x00, 4, 0x01);
@@ -368,5 +371,49 @@ mod tests {
         // Reset_Handler ran: PUSH+BL+branch past boot into setup/loop.
         let pc_now = cpu.regs.r[15] & !1;
         assert!(pc_now > 0x4000 && pc_now < 0x40000, "pc={:08x}", pc_now);
+    }
+
+    #[test]
+    fn ra4m1_arduino_blink_toggles_led() {
+        // Long-run proof: AGT0 underflow IRQs (1ms) drive millis/delay, so the
+        // LED pin must flip within ~1.2s of virtual time. Matches the JS driver
+        // contract: sys.tick() after every run chunk (48k instr = 1ms = one
+        // AGT underflow). Scans all 12 ports so no pin map is assumed.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4blink.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        // Boot first (init takes ~5M), then watch for the toggle.
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            assert_eq!(mem.bad.get(), None, "bad access");
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "no PORT output change in 1200ms virtual");
     }
 }

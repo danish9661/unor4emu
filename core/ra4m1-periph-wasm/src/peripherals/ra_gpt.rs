@@ -1,12 +1,12 @@
 use crate::system::{System, instruction_count};
 use super::Peripheral;
 
-// RA4M1 GPT (General PWM Timer). Real bases:
-// GPT320 0x40169000, GPT321 0x40169100, GPT164-169 0x40169400+0x100.
+// RA4M1 GPT (General PWM Timer). Real bases: GPT0 0x40078000, stride 0x100.
 // MVP subset: GTCR (control/start), GTCNT (counter), GTPR (period),
 // GTCCRA/B (compare), GTIOR (IO), GTINTAD (IRQ enable), GTST (status).
 // Counting is instruction-count driven like the STM32 Timer model.
-pub const GPT320_BASE: u32 = 0x4016_9000;
+// Compare IRQs use ICU event routing (GPT0_CCMPA=87, stride 8 per channel).
+pub const GPT_BASE: u32 = 0x4007_8000; // ch stride 0x100
 
 pub struct RaGpt {
     gtcr: u32,
@@ -18,20 +18,19 @@ pub struct RaGpt {
     gtintad: u32,
     gtst: u32,
     last_tick: u64,
-    irq_ccmpa: i32,
+    ccmpa_event: u32,
     is32: bool,
     ch: u8,
 }
 
 impl RaGpt {
     pub fn new(ch: u8) -> Option<Box<dyn Peripheral>> {
-        // RA4M1 IRQ numbers (MVP stable): GPT0 CCMA=60, GPT1=61, ... GPT7=67
         let is32 = ch < 2;
         Some(Box::new(Self {
             gtcr: 0, gtcnt: 0, gtpr: 0xFFFF_FFFF, gtccra: 0xFFFF_FFFF,
             gtccrb: 0xFFFF_FFFF, gtior: 0, gtintad: 0, gtst: 0,
             last_tick: instruction_count(),
-            irq_ccmpa: 60 + ch as i32, is32, ch,
+            ccmpa_event: 87 + ch as u32 * 8, is32, ch,
         }))
     }
 
@@ -55,7 +54,7 @@ impl RaGpt {
         if cnt == (self.gtccra & mask) {
             self.gtst |= 1;
             if self.gtintad & 1 != 0 {
-                sys.p.nvic.borrow_mut().set_intr_pending(self.irq_ccmpa);
+                crate::system::icu_raise_event(sys, self.ccmpa_event);
             }
         }
         self.gtcnt = cnt;

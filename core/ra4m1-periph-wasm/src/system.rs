@@ -184,6 +184,36 @@ pub fn eth_get_rx_desc_addr() -> u32 { ETH_RX_DESC_ADDR.load(Ordering::Acquire) 
 pub fn eth_set_done(flags: u8) { ETH_DONE.fetch_or(flags, Ordering::Release); }
 pub fn eth_take_done() -> u8 { ETH_DONE.swap(0, Ordering::Acquire) }
 
+// ── RA ICU event routing (IELSR mirror) ────────────────────────────────────
+// The RA ICU maps peripheral events to NVIC IRQs at runtime via IELSRn
+// (FSP R_BSP_IrqCfg writes IELSR[irq] = event, e.g. ELC_EVENT_AGT0_INT).
+// Peripherals raise EVENTS here; every IRQ whose IELSR selects that event
+// pends in the NVIC. Event 0 (ELC_EVENT_NONE) never fires.
+static IELSR_MIRROR: [AtomicU32; 96] = [const { AtomicU32::new(0) }; 96];
+
+pub fn icu_set_ielsr(irq: usize, event: u32) {
+    if irq < 96 {
+        IELSR_MIRROR[irq].store(event, Ordering::Relaxed);
+    }
+}
+
+pub fn icu_raise_event(sys: &WasmSystem, event: u32) {
+    if event == 0 {
+        return;
+    }
+    for (irq, slot) in IELSR_MIRROR.iter().enumerate() {
+        if slot.load(Ordering::Relaxed) == event {
+            sys.p.nvic.borrow_mut().set_intr_pending(irq as i32);
+        }
+    }
+}
+
+fn icu_reset_mirror() {
+    for s in IELSR_MIRROR.iter() {
+        s.store(0, Ordering::Relaxed);
+    }
+}
+
 // FLASH programming/erase state shared with the JS driver (which applies the
 // actual memory mutations to guest memory).
 static FLASH_PROGRAMMING: AtomicBool = AtomicBool::new(false);
@@ -836,6 +866,7 @@ pub fn reset_globals() {
     ETH_DONE.store(0, Relaxed);
     ETH_TX_DESC_ADDR.store(0, Relaxed);
     ETH_RX_DESC_ADDR.store(0, Relaxed);
+    icu_reset_mirror();
     for i in 0..8 {
         DMA_COMPLETED[i].store(false, Relaxed);
         DMA_STREAM_IRQ[i].store(0, Relaxed);

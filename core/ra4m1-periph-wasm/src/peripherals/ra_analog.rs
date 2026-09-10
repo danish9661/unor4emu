@@ -5,23 +5,24 @@ use super::Peripheral;
 // MVP: ADC single-scan polled conversion; channel values synthetic with
 // JS override via adc_set_override (reuse system table, keyed "ADC0").
 // DAC: DADR retained, output readable.
-pub const ADC_BASE: u32 = 0x4017_0000;
-pub const DAC_BASE: u32 = 0x4017_1000;
+pub const ADC_BASE: u32 = 0x4005_C000;
+pub const DAC_BASE: u32 = 0x4005_E000;
 
 pub struct RaAdc {
-    adcsr: u16,   // +0x00 control/status (ADST start, ADCS group)
-    adansa: u32,  // +0x04 channel select A
-    addr: [u16; 26], // result regs +0x20..
+    adcsr: u16,   // +0x00 control/status (ADST=bit15 start, HW-cleared done)
+    adansa: [u32; 2], // +0x04/+0x08 channel select (16+10 channels)
+    addr: [u16; 26], // +0x20 result regs
     cer: u8,
 }
 
 impl RaAdc {
     pub fn new() -> Option<Box<dyn Peripheral>> {
-        Some(Box::new(Self { adcsr: 0, adansa: 0, addr: [0; 26], cer: 0 }))
+        Some(Box::new(Self { adcsr: 0, adansa: [0; 2], addr: [0; 26], cer: 0 }))
     }
     fn convert(&mut self) {
+        let mask = (self.adansa[0] as u64) | ((self.adansa[1] as u64) << 16);
         for ch in 0..26u32 {
-            if self.adansa & (1 << ch) != 0 || ch == 0 {
+            if mask & (1 << ch) != 0 || (mask == 0 && ch == 0) {
                 let v = crate::system::adc_get_override("ADC0", ch).unwrap_or_else(|| {
                     // Synthetic default: temp/vref pattern per channel.
                     ((ch * 137 + 512) & 0x3FFF) as u32
@@ -29,9 +30,8 @@ impl RaAdc {
                 self.addr[ch as usize] = (v & 0x3FFF) as u16;
             }
         }
-        self.adcsr |= 1 << 7; // ADST stays set while converting; complete instantly
-        self.adcsr |= 1 << 5; // ESY? no - set conversion-end flag bit (ADF)
-        self.adcsr &= !(1 << 7);
+        // Instant conversion like HW at full speed: ADST self-clears.
+        self.adcsr &= !(1 << 15);
     }
 }
 
@@ -40,7 +40,8 @@ impl Peripheral for RaAdc {
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
             0x00 => self.adcsr as u32,
-            0x04 => self.adansa,
+            0x04 => self.adansa[0],
+            0x08 => self.adansa[1],
             // ADDR area: return aligned pack of two halfwords so odd channels
             // work through the bus right-shift (bus aligns 0x22 -> 0x20, >>16).
             o if (0x20..0x20 + 26 * 2).contains(&o) && o % 4 == 0 => {
@@ -58,16 +59,17 @@ impl Peripheral for RaAdc {
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {
         match offset {
             0x00 => {
-                let start = value & (1 << 7) != 0;
+                let start = value & (1 << 15) != 0;
                 self.adcsr = (value & 0xFFFF) as u16;
                 if start { self.convert(); }
             }
-            0x04 => self.adansa = value,
+            0x04 => self.adansa[0] = value,
+            0x08 => self.adansa[1] = value,
             _ => {}
         }
     }
     fn write_sized(&mut self, sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
-        // Halfword/byte accesses to ADCSR/ADDR packs.
+        // Halfword/byte accesses to ADCSR/ADANSA packs.
         let base = (offset & !3) as usize;
         for i in 0..size as usize {
             let idx = base + byte_offset as usize + i;
@@ -76,16 +78,18 @@ impl Peripheral for RaAdc {
             match idx {
                 0x00 | 0x01 => {
                     let mut cur = self.adcsr.to_le_bytes();
-                    cur[idx] = v;
                     let was = self.adcsr;
+                    cur[idx] = v;
                     self.adcsr = u16::from_le_bytes(cur);
-                    if idx == 0 && v & 0x80 != 0 && was & 0x80 == 0 { self.convert(); }
+                    if idx == 0x01 && v & 0x80 != 0 && was & 0x8000 == 0 { self.convert(); }
                     let _ = sys;
                 }
-                0x04..=0x07 => {
-                    let mut cur = self.adansa.to_le_bytes();
-                    cur[idx - 0x04] = v;
-                    self.adansa = u32::from_le_bytes(cur);
+                0x04..=0x0B => {
+                    let w = (idx - 0x04) / 4;
+                    let b = (idx - 0x04) % 4;
+                    let mut cur = self.adansa[w].to_le_bytes();
+                    cur[b] = v;
+                    self.adansa[w] = u32::from_le_bytes(cur);
                 }
                 _ => {}
             }

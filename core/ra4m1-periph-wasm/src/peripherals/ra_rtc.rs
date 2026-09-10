@@ -5,12 +5,11 @@ use super::Peripheral;
 // aligned packs + write_sized: SEC+0x00 MIN+0x02 HR+0x04 DAY+0x06 MON+0x08
 // YR+0x0A RCR1+0x0C RCR2+0x0E ALRM+0x10 ALMEN+0x14.
 // 100Hz sub-clock via instruction count; alarm IRQ.
-pub const RTC_BASE: u32 = 0x4008_3000;
+pub const RTC_BASE: u32 = 0x4004_4000;
 
 pub struct RaRtc {
     regs: [u8; 0x20],
     last_tick: u64,
-    irq_alarm: i32,
 }
 
 impl RaRtc {
@@ -19,7 +18,7 @@ impl RaRtc {
         regs[0x06] = 1; // day
         regs[0x08] = 1; // mon
         regs[0x0A] = 0xEA; regs[0x0B] = 0x07; // 2026
-        Some(Box::new(Self { regs, last_tick: instruction_count(), irq_alarm: 60 }))
+        Some(Box::new(Self { regs, last_tick: instruction_count() }))
     }
     fn running(&self) -> bool { self.regs[0x0E] & 1 != 0 }
     fn advance(&mut self, sys: &System) {
@@ -45,7 +44,7 @@ impl RaRtc {
             if (a & 0x7F) as u8 == self.regs[0x00]
                 && ((a >> 8) & 0x7F) as u8 == self.regs[0x02]
                 && ((a >> 16) & 0x3F) as u8 == self.regs[0x04] {
-                sys.p.nvic.borrow_mut().set_intr_pending(self.irq_alarm);
+                crate::system::icu_raise_event(sys, 38); // ELC_EVENT_RTC_ALARM
             }
         }
     }
