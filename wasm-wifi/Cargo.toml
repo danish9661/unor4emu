@@ -1,0 +1,13 @@
+[package]
+name = "uno-r4-wifi-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+ra4m1-periph-wasm = { path = "../core/ra4m1-periph-wasm" }
+wifi-link = { path = "../crates/wifi-link" }
+# Future: esp32s3-emu = { path = "..." } -- only here, never in minima.

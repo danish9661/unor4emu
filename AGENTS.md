@@ -1,0 +1,102 @@
+# AGENTS.md — Arduino UNO R4 (RA4M1) emulator
+
+## 0. Working agreement
+
+- Scope is `uno r4/` ONLY. Never touch `microbit-v2/`, `stm32 F4/`, background
+  processes, or `pkill` anything.
+- Keep going non-stop toward a working end result. Do not stall on questions;
+  decide and build. No "limitations" - fix the bus/model until hardware-exact.
+- Every change must keep `cargo test -- --test-threads=1` green in
+  `core/ra4m1-periph-wasm` (currently 134) and `cargo build` green in the
+  top workspace (Minima only; WiFi is parked).
+- Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
+  `cargo test` flakes (notably LTDC timing). Always verify with
+  `--test-threads=1`. Do not "fix" flakes by editing the CPU to suit a board.
+- CPU bugs go upstream to `Documents/stm32 F4/cpu_bug.md`, never worked around
+  in board code. The decoder is proven; peripherals are the work.
+
+## 1. What this is
+
+Emulator for the **Arduino UNO R4 Minima** (RA4M1 `R7FA4M1AB3CFM`,
+Cortex-M4F @ 48 MHz, 256 KB flash @ `0x00000000`, 32 KB SRAM @ `0x20000000`,
+8 KB data flash). WiFi (`wasm-wifi/`, ESP32-S3) is PARKED - folder stays on
+disk but is excluded from the workspace until its code is ready.
+
+- `core/ra4m1-periph-wasm/` - the emulator core (isolated `[workspace]` so it
+  stays green independently). CPU `src/cpu/` is reused untouched from the
+  STM32F4 snapshot at commit `8a97498`; STM32 peripherals remain as reference
+  until their RA replacements land.
+- `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
+  `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. No ESP32 code may ever link here.
+- `wasm-wifi/` - parked, excluded from workspace members.
+- `crates/wifi-link/` - `WifiModule` trait + `NoWifi` (zero cost). ESP32-S3
+  plugs in here later without touching RA4M1.
+- `core/blinky/blinky.bin`, `core/monox/stm32f407.svd`, `core/docs/*.s` -
+  legacy CPU-test assets. `blinky.bin` is still `include_bytes!`'d by 20+
+  CPU tests; do not delete until CPU tests are R4-native.
+
+## 2. Build / test
+
+```bash
+# core (134 tests, always single-threaded)
+cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
+# just the R4 proofs
+cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml ra4m1 -- --test-threads=1
+# top workspace (Minima only)
+cargo build --manifest-path Cargo.toml
+```
+
+`core/ra4m1-periph-wasm` needs `crate-type = ["cdylib","rlib"]` (rlib so the
+wasm wrappers can path-depend on it).
+
+## 3. RA4M1 map (real bases, via FSP base_addresses.h)
+
+| Block | Base | Model |
+|---|---|---|
+| SYSC | `0x4001_E000` | `ra_system.rs` accept-and-retain, erased reads `0xFFFFFFFF` |
+| MSTP | `0x4008_4000` | same model, own slot |
+| ICU | `0x4000_6000` | stub (same model) |
+| ELC | `0x4008_2000` | stub |
+| PORT0.. | `0x4008_0000`+n*`0x20` | `ra_port.rs` PDR/PODR/PIDR + EORR/PORR |
+| PFS | `0x4008_0800` | retain map |
+| SCI0-3 | `0x4011_8000`+ch*`0x100` | `ra_sci.rs` byte-exact UART |
+| GPT320-321 | `0x4016_9000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven |
+| GPT164-169 | `0x4016_9400`+(ch-2)*`0x100` | same model, 16-bit mask |
+| ARM | `0xE000_xxxx` | reuse NVIC/SysTick/SCB/MPU/FPU/DWT/STIR/ITM |
+
+`Peripherals::new_ra4m1()` builds this map. `WasmSystem::new_ra4m1()` +
+`init_ra4m1()` install it. Legacy `new()`/`init()` (STM32 map) stay for the
+128 legacy CPU tests - do not delete until replacements are proven.
+
+## 4. Bus rules (byte-exact, no hacks)
+
+- `Peripherals::read` aligns to 4, asks the model for the 32-bit pack, then
+  returns `pack >> (8*byte_offset)`. Models return LE packs; word accesses
+  shift 0 (no-op for STM32).
+- `Peripherals::write` merges sub-word stores into the aligned pack, then
+  calls `write_sized(offset_aligned, merged, byte_offset, size)`. Default
+  impl forwards to `write` (STM32 word path). Byte-packed RA models override
+  `write_sized` and apply only bytes in range - this is what makes repeated
+  `STRB TDR,#3` with the same value transmit twice instead of diffing to zero.
+- New RA peripherals MUST use real byte offsets (SCI `TDR+0x03`, not word
+  aliases) and prove them with a firmware-bytes test in `ra4m1.rs`
+  (hand-assembled Thumb with exact LDR-literal `PC=(addr+4)&~3` arithmetic).
+
+## 5. Peripheral status
+
+- DONE: SYSTEM/MSTP/ICU/ELC stubs, PORT+PFS, SCI UART (TX console, RX inject,
+  TXI/RXI IRQs), GPT (count/compare/IRQ), `ra4m1_memory()` flash-at-zero,
+  `WasmCpu::new_ra4m1()`, firmware test printing `H` + LED on.
+- NEXT: ADC14 + DAC12 + RTC + DMAC/DTC (mem-to-mem first) + ELC routing table,
+  then WDT/IWDT + CRC + DOC + OPAMP/ACMP. Defer CTSU/USBFS/CAN. LED matrix
+  (WiFi board) renders from RA GPIO pins, not as a peripheral.
+- Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
+  `Blink.ino` (wraps FSP, runs on the core, only needs register models).
+
+## 6. R4 proofs (`src/ra4m1.rs`)
+
+`ra4m1_boots_from_zero`, `clock_stub_accepts_boot_writes`,
+`ra4m1_map_sci_tx_reaches_console`, `ra4m1_map_gpt_counts_and_matches`,
+`ra4m1_map_port_output_retained`, `ra4m1_firmware_blinky_via_mmio`.
+Keep all green and add one per peripheral using the same shape:
+new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.

@@ -1,0 +1,7 @@
+target/
+**/target/
+*.wasm
+*.wat
+pkg/
+node_modules/
+.pw-scratch/
