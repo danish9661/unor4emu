@@ -110,6 +110,7 @@ h1 span { color: var(--teal); font-weight: 600; }
 .btn-ghost {
   background: transparent; border: 1px solid var(--line); color: var(--ink);
   padding: 10px 16px; border-radius: 10px; cursor: pointer;
+  white-space: nowrap;
 }
 .slider { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 13px; }
 .slider input { accent-color: var(--teal); }
