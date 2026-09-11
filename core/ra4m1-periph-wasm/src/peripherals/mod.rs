@@ -50,6 +50,7 @@ pub mod ra_usb;
 pub mod ra_ctsu;
 pub mod ra_can;
 pub mod ra_i2c;
+pub mod ra_spi;
 pub mod ra_icu;
 
 use std::cell::RefCell;
@@ -663,6 +664,9 @@ impl Peripherals {
         // RA IIC0/IIC1 (RIIC master + virtual EEPROM slave at 0x50)
         if let Some(x) = ra_i2c::RaIic::new_ch(0) { add(0x4005_3000, 0x4005_3100, x); }
         if let Some(x) = ra_i2c::RaIic::new_ch(1) { add(0x4005_3100, 0x4005_3200, x); }
+        // RA SPI0/SPI1 (RSPI; Arduino SPI is polled, loopback jig shared)
+        if let Some(x) = ra_spi::RaSpi::new_spi(0) { add(0x4007_2000, 0x4007_2100, x); }
+        if let Some(x) = ra_spi::RaSpi::new_spi(1) { add(0x4007_2100, 0x4007_2200, x); }
         p.finish_registration();
         p
     }

@@ -29,6 +29,8 @@ pub const ACMPLP_BASE: u32 = 0x4008_5E00;
 pub const CTSU_BASE: u32 = 0x4008_1000;
 pub const CAN0_BASE: u32 = 0x4005_0000;
 pub const IIC0_BASE: u32 = 0x4005_3000;
+pub const SPI0_BASE: u32 = 0x4007_2000;
+pub const SPI1_BASE: u32 = 0x4007_2100;
 pub const USBFS_BASE: u32 = 0x4009_0000;
 
 /// Make a FlatMemory wired for RA4M1 (flash at zero).
@@ -523,6 +525,100 @@ mod tests {
         assert_eq!(sys.p.read(sys, SCI1 + 0x05, 1) & 0xFF, 0xFF, "pull-up");
     }
 
+    #[test]
+    fn ra4m1_map_spi_loopback() {
+        // RSPI0 master (what Arduino SPI drives, polled): SPDR write
+        // shifts out while MISO samples in. Loopback jig echoes; open
+        // bus reads 0xFF; SPRF/RDRF-style flow via SPSR; overrun sticks.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        crate::system::sci_set_spi_loopback(SPI0_BASE, true);
+        sys.p.write(sys, SPI0_BASE + 0x00, 1, 0x48); // SPCR: MSTR + SPE
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0xA5);
+        assert_ne!(sys.p.read(sys, SPI0_BASE + 0x03, 1) & (1 << 7), 0, "SPRF");
+        assert_ne!(sys.p.read(sys, SPI0_BASE + 0x03, 1) & (1 << 5), 0, "SPTEF");
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0xA5, "echo");
+        // SPRF cleared by the read; second write without read overruns.
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x11);
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x22);
+        assert_ne!(sys.p.read(sys, SPI0_BASE + 0x03, 1) & 1, 0, "OVRF");
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0x11, "old kept");
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x03, 1) & 1, 0, "OVRF clear");
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x22);
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0x22, "echo2");
+        // Open bus pulls MISO up.
+        crate::system::sci_set_spi_loopback(SPI0_BASE, false);
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x00);
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0xFF, "pull-up");
+    }
+
+    fn usb_take_tx(sys: &crate::system::WasmSystem) -> Vec<u8> {
+        for slot in sys.p.peripherals.iter() {
+            if slot.start == USBFS_BASE {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut()
+                    .downcast_mut::<crate::peripherals::ra_usb::RaUsb>() {
+                    return std::mem::take(&mut u.tx_capture);
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn with_usb(sys: &crate::system::WasmSystem, f: impl FnOnce(&mut crate::peripherals::ra_usb::RaUsb)) {
+        for slot in sys.p.peripherals.iter() {
+            if slot.start == USBFS_BASE {
+                let mut b = slot.peripheral.borrow_mut();
+                if let Some(u) = b.as_any_mut().downcast_mut::<crate::peripherals::ra_usb::RaUsb>() {
+                    f(u);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Run until the USB link is quiescent (no pending IRQ, no latched
+    /// CTRT): real hosts never pipeline a new SETUP over an unfinished
+    /// transfer, and neither must this driver.
+    fn usb_quiesce(
+        sys: &crate::system::WasmSystem,
+        mem: &mut crate::cpu::mem::FlatMemory,
+        cpu: &mut Cpu,
+    ) {
+        let mut budget = 4_000_000u32;
+        while budget > 0 {
+            let busy = sys.p.nvic.borrow().has_pending()
+                || sys.p.read(sys, USBFS_BASE + 0x40, 2) & (1 << 11) != 0;
+            if !busy {
+                break;
+            }
+            let n = budget.min(48_000);
+            cpu.run(sys, mem, n);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            budget -= n;
+        }
+    }
+
+    /// Run firmware with IRQs until `cond` holds or budget exhausts.
+    fn run_until(
+        sys: &crate::system::WasmSystem,
+        mem: &mut crate::cpu::mem::FlatMemory,
+        cpu: &mut Cpu,
+        mut budget: u32,
+        cond: impl Fn() -> bool,
+    ) {
+        while budget > 0 && !cond() {
+            let n = budget.min(48_000);
+            cpu.run(sys, mem, n);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            budget -= n;
+        }
+    }
+
+
     // CPU: predicated T1 ADD/SUB-immediate preserves flags (printNumber's
     // `ite le; addle r3,#48; addgt r3,#55` must not execute both arms:
     // addle must not kill N before addgt's test). Mirrors the existing
@@ -564,48 +660,6 @@ mod tests {
         assert_eq!(cpu.regs.r[3], 48, "ITE both-arms? r4={} r5={}", cpu.regs.r[4], cpu.regs.r[5]);
         assert_eq!(cpu.regs.r[4], 4, "mls");
         assert_eq!(cpu.regs.r[5], 0, "udiv");
-    }
-
-
-    fn usb_take_tx(sys: &crate::system::WasmSystem) -> Vec<u8> {
-        for slot in sys.p.peripherals.iter() {
-            if slot.start == USBFS_BASE {
-                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut()
-                    .downcast_mut::<crate::peripherals::ra_usb::RaUsb>() {
-                    return std::mem::take(&mut u.tx_capture);
-                }
-            }
-        }
-        Vec::new()
-    }
-
-    fn with_usb(sys: &crate::system::WasmSystem, f: impl FnOnce(&mut crate::peripherals::ra_usb::RaUsb)) {
-        for slot in sys.p.peripherals.iter() {
-            if slot.start == USBFS_BASE {
-                let mut b = slot.peripheral.borrow_mut();
-                if let Some(u) = b.as_any_mut().downcast_mut::<crate::peripherals::ra_usb::RaUsb>() {
-                    f(u);
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Run firmware with IRQs until `cond` holds or budget exhausts.
-    fn run_until(
-        sys: &crate::system::WasmSystem,
-        mem: &mut crate::cpu::mem::FlatMemory,
-        cpu: &mut Cpu,
-        mut budget: u32,
-        cond: impl Fn() -> bool,
-    ) {
-        while budget > 0 && !cond() {
-            let n = budget.min(48_000);
-            cpu.run(sys, mem, n);
-            sys.tick();
-            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
-            budget -= n;
-        }
     }
 
     #[test]

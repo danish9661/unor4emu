@@ -29,6 +29,8 @@ pub const ACMPLP_BASE: u32 = 0x4008_5E00;
 pub const CTSU_BASE: u32 = 0x4008_1000;
 pub const CAN0_BASE: u32 = 0x4005_0000;
 pub const IIC0_BASE: u32 = 0x4005_3000;
+pub const SPI0_BASE: u32 = 0x4007_2000;
+pub const SPI1_BASE: u32 = 0x4007_2100;
 pub const USBFS_BASE: u32 = 0x4009_0000;
 
 /// Make a FlatMemory wired for RA4M1 (flash at zero).
@@ -523,6 +525,35 @@ mod tests {
         assert_eq!(sys.p.read(sys, SCI1 + 0x05, 1) & 0xFF, 0xFF, "pull-up");
     }
 
+    #[test]
+    fn ra4m1_map_spi_loopback() {
+        // RSPI0 master (what Arduino SPI drives, polled): SPDR write
+        // shifts out while MISO samples in. Loopback jig echoes; open
+        // bus reads 0xFF; SPRF/RDRF-style flow via SPSR; overrun sticks.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        crate::system::sci_set_spi_loopback(SPI0_BASE, true);
+        sys.p.write(sys, SPI0_BASE + 0x00, 1, 0x48); // SPCR: MSTR + SPE
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0xA5);
+        assert_ne!(sys.p.read(sys, SPI0_BASE + 0x03, 1) & (1 << 7), 0, "SPRF");
+        assert_ne!(sys.p.read(sys, SPI0_BASE + 0x03, 1) & (1 << 5), 0, "SPTEF");
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0xA5, "echo");
+        // SPRF cleared by the read; second write without read overruns.
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x11);
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x22);
+        assert_ne!(sys.p.read(sys, SPI0_BASE + 0x03, 1) & 1, 0, "OVRF");
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0x11, "old kept");
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x03, 1) & 1, 0, "OVRF clear");
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x22);
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0x22, "echo2");
+        // Open bus pulls MISO up.
+        crate::system::sci_set_spi_loopback(SPI0_BASE, false);
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x00);
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0xFF, "pull-up");
+    }
+
     fn usb_take_tx(sys: &crate::system::WasmSystem) -> Vec<u8> {
         for slot in sys.p.peripherals.iter() {
             if slot.start == USBFS_BASE {
@@ -1009,6 +1040,92 @@ mod tests {
         }
         let s = String::from_utf8_lossy(&all);
         assert!(s.contains("wire-ok"), "no wire-ok in {:?}..", &all[..all.len().min(96)]);
+    }
+
+    #[test]
+    fn ra4m1_spi_ok() {
+        // End-to-end SPI loopback on real FSP r_spi (Arduino drives
+        // RSPI0 polled): enumerate the SPI sketch, arm the loopback jig
+        // on SPI0, expect "spi-ok" (transfer(A5/5A/00) echoes).
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4spi.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        fn ctl_in_q(
+            sys: &crate::system::WasmSystem,
+            mem: &mut crate::cpu::mem::FlatMemory,
+            cpu: &mut Cpu,
+            req: u16, val: u16, idx: u16, len: u16, want: usize,
+        ) -> Vec<u8> {
+            usb_quiesce(sys, &mut *mem, &mut *cpu);
+            with_usb(sys, |u| u.host_setup(req, val, idx, len));
+            crate::system::icu_raise_event(sys, 51);
+            let mut got = Vec::new();
+            let mut budget = 4_000_000u32;
+            while budget > 0 && got.len() < want {
+                let n = budget.min(48_000);
+                cpu.run(sys, mem, n);
+                sys.tick();
+                assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+                got.extend(usb_take_tx(sys));
+                budget -= n;
+            }
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            with_usb(sys, |u| u.host_status_done());
+            crate::system::icu_raise_event(sys, 51);
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            got.extend(usb_take_tx(sys));
+            got
+        }
+        let dev = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0100, 0, 18, 18);
+        assert_eq!((dev[0], dev[1]), (18, 1), "DEVICE descriptor");
+        ctl_out(sys, &mut mem, &mut cpu, 0x0500, 5, 0, &[]);
+        let cfg9 = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, 9, 9);
+        let total = u16::from_le_bytes([cfg9[2], cfg9[3]]) as usize;
+        let cfg = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, total as u16, total);
+        assert_eq!(cfg.len(), total);
+        ctl_out(sys, &mut mem, &mut cpu, 0x0900, 1, 0, &[]);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2021, 0, 0,
+            &[0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08]);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2221, 3, 0, &[]);
+
+        // The sketch idles 200ms after SPI.begin: arm the RSPI
+        // loopback jig (D11/D12/D13 probe to channel 1 = SPI1),
+        // then collect the verdict.
+        crate::system::sci_set_spi_loopback(SPI1_BASE, true);
+        let mut all = Vec::new();
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            all.extend(usb_take_tx(sys));
+            if all.windows(6).any(|w| w == b"spi-ok" || w == b"spi-ng") {
+                break;
+            }
+        }
+        let s = String::from_utf8_lossy(&all);
+        crate::system::sci_set_spi_loopback(SPI1_BASE, false);
+        assert!(s.contains("spi-ok"), "no spi-ok in {:?}..", &all[..all.len().min(64)]);
     }
 
     // CPU: predicated T1 ADD/SUB-immediate preserves flags (printNumber's

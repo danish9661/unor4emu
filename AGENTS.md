@@ -7,7 +7,7 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 155) and `cargo build` green in the
+  `core/ra4m1-periph-wasm` (currently 157) and `cargo build` green in the
   top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -25,12 +25,12 @@ disk but is excluded from the workspace until its code is ready.
 - `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
   excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
   STM32 peripherals remain as reference until their RA replacements land.
-  155 tests must stay green (128 legacy CPU + 27 R4 proofs).
+  157 tests must stay green (128 legacy CPU + 29 R4 proofs).
 - `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
   CPU + ARM + RA peripherals, NO STM32 code, deps are only
   `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
   Release WASM is ~225KB vs ~2.1MB for the snapshot core (~9.4x smaller).
-  Its 24 `ra4m1.rs` proofs mirror the snapshot's register-level ones and must stay green.
+  Its 25 `ra4m1.rs` proofs mirror the snapshot's register-level ones and must stay green.
 - `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
   `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
   No STM32 and no ESP32 code may ever link here.
@@ -44,9 +44,9 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# snapshot core (155 tests, always single-threaded)
+# snapshot core (157 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# small core (24 R4 proofs)
+# small core (25 R4 proofs)
 cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
@@ -70,6 +70,7 @@ wasm wrappers can path-depend on it).
 | DMAC/DTC | `0x4000_5000`/`0x4000_5400` | `ra_dma.rs` queues shared sync-memcopy path |
 | DOC/ADC/DAC | `0x4005_4100`/`0x4005_C000`/`0x4005_E000` | `ra_misc.rs`/`ra_analog.rs` |
 | SCI0-3 | `0x4007_0000`+ch*`0x20` | `ra_sci.rs` byte-exact UART + simple-SPI mode (SMR.CM/SPMR, loopback jig) |
+| SPI0/1 | `0x4007_2000`/`0x4007_2100` | `ra_spi.rs` RSPI master, polled SPRF + loopback (Arduino D11-13 probe to ch1) |
 | IIC0/1 | `0x4005_3000`/`0x4005_3100` | `ra_i2c.rs` RIIC master + virtual EEPROM slave at 0x50 |
 | CRC | `0x4007_4000` | `ra_misc.rs` IEEE-802.3 |
 | GPT0-7 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven (0-1: 32-bit) |
@@ -112,7 +113,9 @@ wasm wrappers can path-depend on it).
   discovered pipes, `rx_inject` raises BRDY like HW), CTSU
   (STRT->tick counters + END event), CAN0 (mailbox TX/RX + self-test
   loopback), IIC0/1 (RIIC master vs virtual EEPROM slave at 0x50, Wire
-  sketch round-trips on real FSP), SCI simple-SPI (shift + loopback jig).
+  sketch round-trips on real FSP), SCI simple-SPI (shift + loopback jig),
+  SPI0/1 (RSPI master, polled SPRF + loopback; Arduino D11-13 probe to
+  ch1, SPI firmware proof round-trips on real FSP).
 - Hard-won truths: RA4M1 bases differ from RA6 everywhere (this §3 is from
   R7FA4M1AB.h, never assume); SYSC OPCCR resets 0x00 with timed TSF;
   AGT reload latches the programmed counter (AGTCMA untouched when output
@@ -131,7 +134,10 @@ wasm wrappers can path-depend on it).
   RIIC TDRE+TXI fire on START and latched flags fire on ICIER enable
   (the interrupt-driven FSP flow waits on both, never on flag edges);
   FSP RXI discards the first ICDRR read, so SLA+R must NOT preload
-  byte0 (stream from the next tick instead).
+  byte0 (stream from the next tick instead); restart-write yields no
+  completion event (no STOP by design - tolerated, real sketches ignore
+  its return too); RSPI D11-13 probe to SPI1 (0x40072100), polled SPRF,
+  SPDR byte lane is +0x04.
 - NEXT: browser demo page. LED matrix (WiFi board)
   renders from RA GPIO pins, not as a peripheral.
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
@@ -152,7 +158,8 @@ wasm wrappers can path-depend on it).
 `ra4m1_usb_cdc_echo`, `ra4m1_map_ctsu_measures`,
 `ra4m1_map_can_loopback`, `ra4m1_map_i2c_eeprom`,
 `ra4m1_map_sci_spi_loopback`, `ra4m1_wire_ok`,
-`ra4m1_ite_add_imm_preserves_flags`.
+`ra4m1_ite_add_imm_preserves_flags`, `ra4m1_map_spi_loopback`,
+`ra4m1_spi_ok`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
 
@@ -168,6 +175,7 @@ emulator loads it at `APP_BASE=0x4000` and boots from that table - loading
 at zero executes shifted garbage (looks plausible, faults in an epilogue).
 `core/blinky/r4blink.bin` is the vendored Blink build the boot test runs
 (500k instructions, no fault, PC in app region). `core/blinky/r4serial.bin`
-(Serial hello), `core/blinky/r4echo.bin` (bulk echo) and
-`core/blinky/r4wire.bin` (Wire EEPROM round-trip) are the vendored USB/I2C
+(Serial hello), `core/blinky/r4echo.bin` (bulk echo),
+`core/blinky/r4wire.bin` (Wire EEPROM round-trip) and
+`core/blinky/r4spi.bin` (SPI loopback) are the vendored USB/I2C/SPI
 proof builds, compiled the same way from their sketches.
