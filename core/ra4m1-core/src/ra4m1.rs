@@ -26,6 +26,8 @@ pub const CRC_BASE: u32 = 0x4007_4000;
 pub const DOC_BASE: u32 = 0x4005_4100;
 pub const OPAMP_BASE: u32 = 0x4008_6000;
 pub const ACMPLP_BASE: u32 = 0x4008_5E00;
+pub const CTSU_BASE: u32 = 0x4008_1000;
+pub const CAN0_BASE: u32 = 0x4005_0000;
 pub const USBFS_BASE: u32 = 0x4009_0000;
 
 /// Make a FlatMemory wired for RA4M1 (flash at zero).
@@ -342,6 +344,85 @@ mod tests {
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 1);
         sys.p.write(sys, ACMPLP_BASE + 0x10, 4, 0x100);
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 0);
+    }
+
+    #[test]
+    fn ra4m1_map_ctsu_measures() {
+        // FSP-like self-capacitance scan: PON, channel, pin enable,
+        // STRT -> tick fills the sensor/reference counters and raises
+        // CTSU_END (event 68, routed to IRQ11 here).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 11 * 4, 4, 68); // IELSR11 = CTSU_END
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 11);     // ISER0: IRQ11
+        sys.p.write(sys, CTSU_BASE + 0x01, 1, 0x01);   // CTSUCR1.PON
+        sys.p.write(sys, CTSU_BASE + 0x04, 1, 5);      // CTSUMCH0 = ch5
+        sys.p.write(sys, CTSU_BASE + 0x06, 1, 1 << 5); // CHAC0: TS5 on
+        sys.p.write(sys, CTSU_BASE + 0x14, 2, 0x000F); // SO0 count
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x01);   // STRT
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x18, 2) & 0xFFFF, 0x0800 + 5 * 0x41, "SC");
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x1A, 2) & 0xFFFF, 0x3C00, "RC");
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x11, 1) & 0x60, 0, "no overflow");
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x00, 1) & 1, 1, "STRT retained");
+        assert!(sys.p.nvic.borrow().has_pending(), "END event pending");
+        // Oversize override clamps and sets SOVF (clear-by-0).
+        crate::system::ctsu_set_override(5, 0x12345);
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x00); // clear STRT
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x01); // re-trigger
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x18, 2) & 0xFFFF, 0xFFFF, "clamped");
+        assert_ne!(sys.p.read(sys, CTSU_BASE + 0x11, 1) & (1 << 5), 0, "SOVF");
+        sys.p.write(sys, CTSU_BASE + 0x11, 1, !(1 << 5) & 0xFF);
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x11, 1) & 0x60, 0, "SOVF cleared");
+        crate::system::ctsu_clear_override(5);
+    }
+
+    #[test]
+    fn ra4m1_map_can_loopback() {
+        // CAN0 self-test (internal loopback): reset -> halt -> operation
+        // with STR tracking each mode, TX MB0 (SID 0x123, 8 bytes) into
+        // RX MB8, MIER-gated mailbox events. Tick completes the frame.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 12 * 4, 4, 77); // IELSR12 = MBOX_RX
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 12);     // ISER0: IRQ12
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0100); // CANM = reset
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & (1 << 8), 0, "RSTST");
+        sys.p.write(sys, CAN0_BASE + 0x844, 4, 0x0018_0009); // BCR retain
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0200); // CANM = halt
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & (1 << 9), 0, "HLTST");
+        sys.p.write(sys, CAN0_BASE + 0x858, 1, 0x07); // TCR: TSTE + ST1 loopback
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0000); // CANM = operation
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & 0x0300, 0, "op mode");
+        sys.p.write(sys, CAN0_BASE + 0x400, 4, 0); // MKR0: accept all
+        sys.p.write(sys, CAN0_BASE + 0x428, 4, 0); // MKIVLR: masks valid
+        sys.p.write(sys, CAN0_BASE + 0x200, 4, 0x123 << 18); // MB0 SID
+        sys.p.write(sys, CAN0_BASE + 0x204, 2, 8); // DLC
+        for i in 0..8u32 {
+            sys.p.write(sys, CAN0_BASE + 0x206 + i, 1, 0xA0 + i);
+        }
+        sys.p.write(sys, CAN0_BASE + 0x820 + 0, 1, 0x80); // MB0 TRMREQ
+        sys.p.write(sys, CAN0_BASE + 0x820 + 8, 1, 0x40); // MB8 RECREQ
+        sys.p.write(sys, CAN0_BASE + 0x42C, 4, (1 << 0) | (1 << 8)); // MIER
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x820, 1) & 0x81, 0x01, "SENTDATA, TRMREQ clear");
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & (1 << 1), 0, "SDST");
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x828, 1) & 1, 0, "MB8 NEWDATA");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x280, 4), 0x123 << 18, "MB8 ID");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x284, 2) & 0xF, 8, "MB8 DLC");
+        for i in 0..8u32 {
+            assert_eq!(sys.p.read(sys, CAN0_BASE + 0x286 + i, 1) & 0xFF, 0xA0 + i, "MB8 D{}", i);
+        }
+        assert!(sys.p.nvic.borrow().has_pending(), "MBOX_RX pending");
+        // Reading out clears NEWDATA (write-0) and drops NDST.
+        sys.p.write(sys, CAN0_BASE + 0x828, 1, 0x40); // RECREQ kept, flags cleared
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x828, 1) & 1, 0, "NEWDATA clear");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & 1, 0, "NDST clear");
     }
 
     fn usb_take_tx(sys: &crate::system::WasmSystem) -> Vec<u8> {

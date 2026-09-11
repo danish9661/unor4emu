@@ -459,6 +459,24 @@ pub fn adc_get_override(peripheral: &str, channel: u32) -> Option<u32> {
     adc_overrides().lock().unwrap().get(&(peripheral.to_string(), channel)).copied()
 }
 
+// ── CTSU touch-count overrides (JS/test plumbing) ──────────────────────────
+// Keyed ("CTSU", channel) -> raw sensor count. Values above 16 bits clamp
+// to 0xFFFF and set SOVF, so overflow is testable through the same path.
+static CTSU_OVERRIDES: OnceLock<Mutex<std::collections::HashMap<u32, u32>>> = OnceLock::new();
+
+fn ctsu_overrides() -> &'static Mutex<std::collections::HashMap<u32, u32>> {
+    CTSU_OVERRIDES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+pub fn ctsu_set_override(channel: u32, value: u32) {
+    ctsu_overrides().lock().unwrap().insert(channel, value);
+}
+pub fn ctsu_clear_override(channel: u32) {
+    ctsu_overrides().lock().unwrap().remove(&channel);
+}
+pub fn ctsu_get_override(channel: u32) -> Option<u32> {
+    ctsu_overrides().lock().unwrap().get(&channel).copied()
+}
+
 // ── SPI bus taps (JS hardware layer plumbing) ──────────────────────────────
 // Event word layout: bit 31 = CS edge event, bit 30 = asserted (1) when CS
 // is a CS event, bit 29 = DC level (1 = data) when the tap has a DC pin,
@@ -852,6 +870,7 @@ pub fn reset_globals() {
     if let Some(m) = I2C_TAP_TX.get() { m.lock().unwrap().clear(); }
     if let Some(m) = I2C_TAP_RX.get() { m.lock().unwrap().clear(); }
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = CTSU_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CAN_STAGED.get() { m.lock().unwrap().clear(); }
     if let Some(m) = AUDIO_SOURCE.get() { *m.lock().unwrap() = None; }
     if let Some(m) = AUDIO_CAPTURE.get() { m.lock().unwrap().clear(); }

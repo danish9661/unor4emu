@@ -495,8 +495,11 @@ impl Cpu {
         // the ALIGN pad flag (bit 9) when STKALIGN padded above.
         let xpsr = self.regs.xpsr | 0x01000000 | if pad != 0 { 0x200 } else { 0 };
         mem.write32(sp.wrapping_add(28), xpsr);
-        // Handler mode always runs on MSP.
-        self.regs.r[13] = self.regs.msp;
+        // NOTE: r13 is NOT reloaded from the bank here. In handler mode
+        // r13 is live (outer-handler pushes moved it below the bank), and
+        // reloading the stale bank would stack the nested frame over the
+        // outer frame (nested USB+AGT IRQs wedged this way: the outer
+        // return then unstacked stale words and jumped wild).
         // LR = EXC_RETURN for where this handler returns to: a nested take
         // (preemption) returns via F1 to the outer handler; a thread take
         // selects the thread stack it came from. FType bit follows the
@@ -610,12 +613,18 @@ impl Cpu {
             self.raise_sync(sys, mem, Self::usage_target(sys));
             return self.fault.is_none();
         }
-        // Unstack from the bank selected by EXC_RETURN (using CURRENT bank
-        // values — a PendSV task switch updates PSP mid-handler). The FP
-        // variants (ED/E9) select the same bank as their FType=1 twins;
-        // F1/E1 always unstack from MSP (handler mode runs on MSP).
+        // Unstack base: handler mode always runs on MSP and r13 is its
+        // live SP, so F1/E1/F9/ED returns unstack from r13 (a nested take
+        // + return leaves the bank pointing at the dead inner frame, and
+        // unstacking from it resurrects stale words as PC - nested USB+AGT
+        // IRQs jumped wild this way). Only returns to PSP-thread use the
+        // PSP bank: a PendSV task switch updates PSP mid-handler while
+        // r13 tracks MSP. The FP variants (ED/E9) match their FType=1
+        // twins; F1/E1 run on MSP.
+        // Writeback below re-syncs r13 and both banks past the popped
+        // frame, so `mrs msp` and later takes observe coherent values.
         let to_psp = exc == EXC_RETURN_PSP || exc == EXC_RETURN_PSP_FP;
-        let mut sp = if to_psp { self.regs.psp } else { self.regs.msp };
+        let mut sp = if to_psp { self.regs.psp } else { self.regs.r[13] };
         // Pop the returning entry's saved state first (its IT/FP context is
         // done; the outer frame owns the model FP state again). The FP pop
         // is unconditional: every take pushes exactly one save, so every

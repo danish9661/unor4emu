@@ -18,6 +18,8 @@ pub mod ra_dma;
 pub mod ra_misc;
 pub mod ra_opamp;
 pub mod ra_usb;
+pub mod ra_ctsu;
+pub mod ra_can;
 pub mod ra_icu;
 
 use std::cell::RefCell;
@@ -209,6 +211,10 @@ impl Peripherals {
         if let Some(x) = ra_opamp::RaAcmplp::new() { add(0x4008_5E00, 0x4008_5F00, x); }
         // RA USBFS (retain file; endpoints later)
         if let Some(x) = ra_usb::RaUsb::new() { add(0x4009_0000, 0x4009_1000, x); }
+        // RA CTSU (touch sensing: STRT->tick->counters + END event)
+        if let Some(x) = ra_ctsu::RaCtsu::new() { add(0x4008_1000, 0x4008_1100, x); }
+        // RA CAN0 (mailbox CAN; CAN1 has no routable mailbox events here)
+        if let Some(x) = ra_can::RaCan::new_can0() { add(0x4005_0000, 0x4005_1000, x); }
         p.finish_registration();
         p
     }

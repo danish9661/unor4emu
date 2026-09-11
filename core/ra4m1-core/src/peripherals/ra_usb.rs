@@ -69,11 +69,14 @@ impl RaUsb {
     /// Queue received bytes on a pipe (virtual-host RX for Serial.read /
     /// control OUT stages). DTLN reflects them; FIFO reads drain. Sets the
     /// BRDY flag like HW does on packet arrival (the stack reads OUT data
-    /// in its BRDY path, after the setup-stage BCLR has passed).
-    pub fn rx_inject(&mut self, pipe: usize, data: &[u8]) {
+    /// in its BRDY path, after the setup-stage BCLR has passed) and raises
+    /// the interrupt when the pipe's BRDYENB is armed - also like HW, so
+    /// the driver never hand-pokes the event after feeding data.
+    pub fn rx_inject(&mut self, sys: &System, pipe: usize, data: &[u8]) {
         if pipe < 10 {
             self.rx_buf[pipe].extend_from_slice(data);
             self.brdy |= 1 << pipe;
+            self.raise_usb_int(sys);
         }
     }
 
@@ -122,6 +125,9 @@ impl RaUsb {
         let mps = self.pipe_mps(pipe);
         while self.tx_buf[pipe].len() >= mps {
             let pkt: Vec<u8> = self.tx_buf[pipe].drain(..mps).collect();
+            if std::env::var("USBLOG2").is_ok() {
+                eprintln!("USBLOG2 auto-flush pipe={} {}B", pipe, pkt.len());
+            }
             self.tx_capture.extend_from_slice(&pkt);
             self.bemp |= 1 << pipe;
             self.brdy |= 1 << pipe;
@@ -143,6 +149,9 @@ impl RaUsb {
         }
         if v & (1 << 15) != 0 {
             // BVAL: finalize TX packet -> virtual host.
+            if std::env::var("USBLOG2").is_ok() {
+                eprintln!("USBLOG2 BVAL pipe={} {}B", pipe, self.tx_buf[pipe].len());
+            }
             self.tx_capture.extend_from_slice(&self.tx_buf[pipe]);
             self.tx_buf[pipe].clear();
             self.bemp |= 1 << pipe;

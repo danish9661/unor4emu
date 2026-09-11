@@ -106,6 +106,19 @@ pub fn adc_clear_channel_value(channel: u32) {
     system::adc_clear_override("ADC0", channel);
 }
 
+/// Force a CTSU channel to read `value` (16-bit, saturating) instead of
+/// the default touch count.
+#[wasm_bindgen]
+pub fn ctsu_set_channel_value(channel: u32, value: u32) {
+    system::ctsu_set_override(channel, value);
+}
+
+/// Remove a CTSU channel override.
+#[wasm_bindgen]
+pub fn ctsu_clear_channel_value(channel: u32) {
+    system::ctsu_clear_override(channel);
+}
+
 #[wasm_bindgen]
 pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()
@@ -170,7 +183,7 @@ pub fn usb_host_status_done() {
 /// Virtual-host: queue received bytes on a pipe (Serial.read path).
 #[wasm_bindgen]
 pub fn usb_rx_inject(pipe: u8, data: &[u8]) {
-    with_usb(|u| u.rx_inject(pipe as usize, data));
+    with_usb(|u| u.rx_inject(sys(), pipe as usize, data));
 }
 
 use cpu::{Cpu, mem::{FlatMemory, Memory}};

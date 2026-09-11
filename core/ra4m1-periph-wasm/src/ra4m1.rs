@@ -26,6 +26,8 @@ pub const CRC_BASE: u32 = 0x4007_4000;
 pub const DOC_BASE: u32 = 0x4005_4100;
 pub const OPAMP_BASE: u32 = 0x4008_6000;
 pub const ACMPLP_BASE: u32 = 0x4008_5E00;
+pub const CTSU_BASE: u32 = 0x4008_1000;
+pub const CAN0_BASE: u32 = 0x4005_0000;
 pub const USBFS_BASE: u32 = 0x4009_0000;
 
 /// Make a FlatMemory wired for RA4M1 (flash at zero).
@@ -344,6 +346,85 @@ mod tests {
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 0);
     }
 
+    #[test]
+    fn ra4m1_map_ctsu_measures() {
+        // FSP-like self-capacitance scan: PON, channel, pin enable,
+        // STRT -> tick fills the sensor/reference counters and raises
+        // CTSU_END (event 68, routed to IRQ11 here).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 11 * 4, 4, 68); // IELSR11 = CTSU_END
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 11);     // ISER0: IRQ11
+        sys.p.write(sys, CTSU_BASE + 0x01, 1, 0x01);   // CTSUCR1.PON
+        sys.p.write(sys, CTSU_BASE + 0x04, 1, 5);      // CTSUMCH0 = ch5
+        sys.p.write(sys, CTSU_BASE + 0x06, 1, 1 << 5); // CHAC0: TS5 on
+        sys.p.write(sys, CTSU_BASE + 0x14, 2, 0x000F); // SO0 count
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x01);   // STRT
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x18, 2) & 0xFFFF, 0x0800 + 5 * 0x41, "SC");
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x1A, 2) & 0xFFFF, 0x3C00, "RC");
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x11, 1) & 0x60, 0, "no overflow");
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x00, 1) & 1, 1, "STRT retained");
+        assert!(sys.p.nvic.borrow().has_pending(), "END event pending");
+        // Oversize override clamps and sets SOVF (clear-by-0).
+        crate::system::ctsu_set_override(5, 0x12345);
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x00); // clear STRT
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x01); // re-trigger
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x18, 2) & 0xFFFF, 0xFFFF, "clamped");
+        assert_ne!(sys.p.read(sys, CTSU_BASE + 0x11, 1) & (1 << 5), 0, "SOVF");
+        sys.p.write(sys, CTSU_BASE + 0x11, 1, !(1 << 5) & 0xFF);
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x11, 1) & 0x60, 0, "SOVF cleared");
+        crate::system::ctsu_clear_override(5);
+    }
+
+    #[test]
+    fn ra4m1_map_can_loopback() {
+        // CAN0 self-test (internal loopback): reset -> halt -> operation
+        // with STR tracking each mode, TX MB0 (SID 0x123, 8 bytes) into
+        // RX MB8, MIER-gated mailbox events. Tick completes the frame.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 12 * 4, 4, 77); // IELSR12 = MBOX_RX
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 12);     // ISER0: IRQ12
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0100); // CANM = reset
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & (1 << 8), 0, "RSTST");
+        sys.p.write(sys, CAN0_BASE + 0x844, 4, 0x0018_0009); // BCR retain
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0200); // CANM = halt
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & (1 << 9), 0, "HLTST");
+        sys.p.write(sys, CAN0_BASE + 0x858, 1, 0x07); // TCR: TSTE + ST1 loopback
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0000); // CANM = operation
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & 0x0300, 0, "op mode");
+        sys.p.write(sys, CAN0_BASE + 0x400, 4, 0); // MKR0: accept all
+        sys.p.write(sys, CAN0_BASE + 0x428, 4, 0); // MKIVLR: masks valid
+        sys.p.write(sys, CAN0_BASE + 0x200, 4, 0x123 << 18); // MB0 SID
+        sys.p.write(sys, CAN0_BASE + 0x204, 2, 8); // DLC
+        for i in 0..8u32 {
+            sys.p.write(sys, CAN0_BASE + 0x206 + i, 1, 0xA0 + i);
+        }
+        sys.p.write(sys, CAN0_BASE + 0x820 + 0, 1, 0x80); // MB0 TRMREQ
+        sys.p.write(sys, CAN0_BASE + 0x820 + 8, 1, 0x40); // MB8 RECREQ
+        sys.p.write(sys, CAN0_BASE + 0x42C, 4, (1 << 0) | (1 << 8)); // MIER
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x820, 1) & 0x81, 0x01, "SENTDATA, TRMREQ clear");
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & (1 << 1), 0, "SDST");
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x828, 1) & 1, 0, "MB8 NEWDATA");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x280, 4), 0x123 << 18, "MB8 ID");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x284, 2) & 0xF, 8, "MB8 DLC");
+        for i in 0..8u32 {
+            assert_eq!(sys.p.read(sys, CAN0_BASE + 0x286 + i, 1) & 0xFF, 0xA0 + i, "MB8 D{}", i);
+        }
+        assert!(sys.p.nvic.borrow().has_pending(), "MBOX_RX pending");
+        // Reading out clears NEWDATA (write-0) and drops NDST.
+        sys.p.write(sys, CAN0_BASE + 0x828, 1, 0x40); // RECREQ kept, flags cleared
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x828, 1) & 1, 0, "NEWDATA clear");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & 1, 0, "NDST clear");
+    }
+
     fn usb_take_tx(sys: &crate::system::WasmSystem) -> Vec<u8> {
         for slot in sys.p.peripherals.iter() {
             if slot.start == USBFS_BASE {
@@ -521,8 +602,8 @@ mod tests {
         // Let the firmware arm the OUT stage first (setup -> BCLR passes).
         run_until(sys, mem, cpu, 2_000_000, || false);
         if !data.is_empty() {
-            with_usb(sys, |u| u.rx_inject(0, data));
-            crate::system::icu_raise_event(sys, 51);
+            // Packet arrival raises BRDY in the model, like HW.
+            with_usb(sys, |u| u.rx_inject(sys, 0, data));
         }
         run_until(sys, mem, cpu, 6_000_000, || false);
     }
@@ -619,6 +700,134 @@ mod tests {
         }
         let s = String::from_utf8_lossy(&all);
         assert!(s.contains("hello"), "no hello in {:?}..", &all[..all.len().min(64)]);
+    }
+
+    /// Read back a pipe's PIPECFG window (TYPE[15:14], DIR b4, EPNUM[3:0]).
+    fn usb_pipe_cfg(sys: &crate::system::WasmSystem, pipe: u32) -> u16 {
+        sys.p.write(sys, USBFS_BASE + 0x64, 2, pipe);
+        sys.p.read(sys, USBFS_BASE + 0x68, 2) as u16
+    }
+
+    #[test]
+    fn ra4m1_usb_cdc_echo() {
+        // Native bulk endpoints, both directions through real pipe config:
+        // enumerate the echo sketch, discover the CDC bulk pipes via
+        // PIPECFG (no hardcoded pipe numbers), inject a multi-packet
+        // message on bulk-OUT (Serial.read path), expect the exact bytes
+        // back on bulk-IN (Serial.write path).
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4echo.bin");
+        let mut mem = ra4m1_memory();
+        // Erased flash reads 0xFF on silicon: pad the bootloader window
+        // with 0xFF so any wild jump below the app faults precisely at
+        // its landing (0xFFFF = undefined) instead of NOP-sliding on 0x00.
+        let mut img = vec![0xFFu8; APP_BASE as usize];
+        img.extend_from_slice(bin);
+        mem.load(&img, FLASH_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        fn ctl_in_q(
+            sys: &crate::system::WasmSystem,
+            mem: &mut crate::cpu::mem::FlatMemory,
+            cpu: &mut Cpu,
+            req: u16, val: u16, idx: u16, len: u16, want: usize,
+        ) -> Vec<u8> {
+            usb_quiesce(sys, &mut *mem, &mut *cpu);
+            with_usb(sys, |u| u.host_setup(req, val, idx, len));
+            crate::system::icu_raise_event(sys, 51);
+            let mut got = Vec::new();
+            let mut budget = 4_000_000u32;
+            while budget > 0 && got.len() < want {
+                let n = budget.min(48_000);
+                cpu.run(sys, mem, n);
+                sys.tick();
+                assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+                got.extend(usb_take_tx(sys));
+                budget -= n;
+            }
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            with_usb(sys, |u| u.host_status_done());
+            crate::system::icu_raise_event(sys, 51);
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            got.extend(usb_take_tx(sys));
+            got
+        }
+        let dev = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0100, 0, 18, 18);
+        assert_eq!((dev[0], dev[1]), (18, 1), "DEVICE descriptor");
+        ctl_out(sys, &mut mem, &mut cpu, 0x0500, 5, 0, &[]);
+        let cfg9 = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, 9, 9);
+        let total = u16::from_le_bytes([cfg9[2], cfg9[3]]) as usize;
+        let cfg = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, total as u16, total);
+        assert_eq!(cfg.len(), total);
+        ctl_out(sys, &mut mem, &mut cpu, 0x0900, 1, 0, &[]);
+        // DTR so `while (!Serial)` exits and writes are accepted.
+        ctl_out(sys, &mut mem, &mut cpu, 0x2021, 0, 0,
+            &[0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08]);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2221, 3, 0, &[]);
+
+        // Discover the CDC bulk pipes: TYPE==bulk(1), EPNUM==2, DIR=OUT/IN.
+        let mut out_pipe = None;
+        let mut in_pipe = None;
+        for n in 1..10u32 {
+            let c = usb_pipe_cfg(sys, n);
+            if (c >> 14) & 3 == 1 && c & 0xF == 2 {
+                if c & (1 << 4) == 0 { out_pipe = Some(n as usize); }
+                else { in_pipe = Some(n as usize); }
+            }
+        }
+        let (out_pipe, in_pipe) = (out_pipe.expect("bulk-OUT pipe"), in_pipe.expect("bulk-IN pipe"));
+
+        // 100 bytes > 64B MPS: multi-packet both ways. The OUT side goes
+        // in two host packets (64 + 36): after the first lands, run until
+        // the firmware drains it, then feed the rest - like a real host,
+        // which never pipelines a second packet over an unfinished one.
+        let msg: Vec<u8> = (0..100u32).map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8).collect();
+        let mut back = Vec::new();
+        for (step, window) in [&msg[..64], &msg[64..]].iter().enumerate() {
+            with_usb(sys, |u| u.rx_inject(sys, out_pipe, window));
+            for _ in 0..1200 {
+                cpu.run(sys, &mut mem, 48_000);
+                sys.tick();
+                assert!(cpu.fault.is_none(), "fault: {:?} step {}", cpu.fault, step);
+                back.extend(usb_take_tx(sys));
+                if back.len() >= msg.len() {
+                    break;
+                }
+                // Let the second packet in once the first is fully echoed.
+                if step == 0 && back.len() >= 64 {
+                    break;
+                }
+            }
+        }
+        // Drain any stragglers, then compare the exact round-trip.
+        for _ in 0..200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            back.extend(usb_take_tx(sys));
+            if back.len() >= msg.len() {
+                break;
+            }
+        }
+        assert_eq!(back, msg, "echo mismatch ({}B)", back.len());
     }
 
     #[test]

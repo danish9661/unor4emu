@@ -7,7 +7,7 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 147) and `cargo build` green in the
+  `core/ra4m1-periph-wasm` (currently 151) and `cargo build` green in the
   top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -25,12 +25,12 @@ disk but is excluded from the workspace until its code is ready.
 - `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
   excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
   STM32 peripherals remain as reference until their RA replacements land.
-  145 tests must stay green (128 legacy CPU + 17 R4 proofs).
+  151 tests must stay green (128 legacy CPU + 23 R4 proofs).
 - `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
   CPU + ARM + RA peripherals, NO STM32 code, deps are only
   `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
   Release WASM is ~225KB vs ~2.1MB for the snapshot core (~9.4x smaller).
-  Its 17 `ra4m1.rs` proofs mirror the snapshot's and must stay green.
+  Its 21 `ra4m1.rs` proofs mirror the snapshot's register-level ones and must stay green.
 - `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
   `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
   No STM32 and no ESP32 code may ever link here.
@@ -44,9 +44,9 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# snapshot core (145 tests, always single-threaded)
+# snapshot core (151 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# small core (17 R4 proofs)
+# small core (21 R4 proofs)
 cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
@@ -75,6 +75,8 @@ wasm wrappers can path-depend on it).
 | AGT0-1 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` 16-bit count |
 | ACMPLP/OPAMP | `0x4008_5E00`/`0x4008_6000` | `ra_opamp.rs` loopback + compare |
 | USBFS | `0x4009_0000` | `ra_usb.rs` endpoint FIFOs + TX capture + IRQs |
+| CTSU | `0x4008_1000` | `ra_ctsu.rs` STRT->tick counters + END event |
+| CAN0 | `0x4005_0000` | `ra_can.rs` mailbox TX/RX + self-test loopback (CAN1: no routable events, unmapped) |
 | ARM | `0xE000_xxxx` | reuse NVIC/SysTick/SCB/MPU/FPU/DWT/STIR/ITM |
 
 `Peripherals::new_ra4m1()` builds this map. `WasmSystem::new_ra4m1()` +
@@ -104,14 +106,23 @@ wasm wrappers can path-depend on it).
   events), WDT/IWDT, CRC, DOC, OPAMP/ACMP, USBFS endpoint FIFOs + TX
   capture + IRQs (virtual-host enumeration proven against TinyUSB),
   `ra4m1_memory()` flash-at-zero, `WasmCpu::new_ra4m1()`, Arduino Blink
-  boots AND toggles the LED (AGT0 1ms IRQs drive millis).
+  boots AND toggles the LED (AGT0 1ms IRQs drive millis), native
+  USB-Serial bulk endpoints (echo sketch round-trips 100B via PIPECFG-
+  discovered pipes, `rx_inject` raises BRDY like HW), CTSU
+  (STRT->tick counters + END event), CAN0 (mailbox TX/RX + self-test
+  loopback).
 - Hard-won truths: RA4M1 bases differ from RA6 everywhere (this §3 is from
   R7FA4M1AB.h, never assume); SYSC OPCCR resets 0x00 with timed TSF;
   AGT reload latches the programmed counter (AGTCMA untouched when output
   support is off); AGT flag bits clear-by-0 (start value 0xF1 keeps it
   running); `MRS PSR` must include live IPSR or FSP routes every IRQ wrong
-  (fixed in snapshot thumb.rs - report upstream with the other CPU bugs).
-- NEXT: native USB-Serial (endpoints), CTSU, CAN. LED matrix (WiFi board)
+  (fixed in snapshot thumb.rs - report upstream with the other CPU bugs);
+  exception takes/returns must use live r13, never the stale bank, or
+  nested IRQs unstack garbage as PC (fixed in both cores' cpu/mod.rs -
+  reported upstream in `Documents/stm32 F4/cpu_bug.md` §11); DCPCTR.CCPL
+  is a strobe (every write latches BEMP, retained bits wedge status);
+  CFIFO OUT drains are byte reads (popping pairs drops odd bytes).
+- NEXT: I2C/SPI, browser demo page. LED matrix (WiFi board)
   renders from RA GPIO pins, not as a peripheral.
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
@@ -127,7 +138,9 @@ wasm wrappers can path-depend on it).
 `ra4m1_map_crc_and_doc`, `ra4m1_map_sci_echo_path`,
 `ra4m1_map_opamp_follower_and_acmp`, `ra4m1_arduino_blink_boots`,
 `ra4m1_arduino_blink_toggles_led`, `ra4m1_map_usb_tx_reaches_capture`,
-`ra4m1_usb_enumerates_cdc`.
+`ra4m1_usb_enumerates_cdc`, `ra4m1_usb_serial_hello`,
+`ra4m1_usb_cdc_echo`, `ra4m1_map_ctsu_measures`,
+`ra4m1_map_can_loopback`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
 
