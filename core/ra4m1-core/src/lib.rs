@@ -119,6 +119,13 @@ pub fn ctsu_clear_channel_value(channel: u32) {
     system::ctsu_clear_override(channel);
 }
 
+/// Tie an SCI channel's MOSI to MISO (SPI loopback jig) or not.
+/// Off by default: idle MISO reads pulled-up 0xFF.
+#[wasm_bindgen]
+pub fn spi_set_loopback(addr: u32, on: bool) {
+    system::sci_set_spi_loopback(addr, on);
+}
+
 #[wasm_bindgen]
 pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()

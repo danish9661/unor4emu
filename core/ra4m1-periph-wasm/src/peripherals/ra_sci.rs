@@ -1,11 +1,18 @@
 use crate::system::{System, get_uart_output};
 use super::Peripheral;
 
-// RA4M1 SCI (UART mode). Real bases: SCI0 0x40070000, stride 0x20;
-// channels 0,1,2,9 (BSP_FEATURE_SCI_CHANNELS=0x207).
-// Real byte-packed registers: SMR+0x00, BRR+0x01, SCR+0x02, TDR+0x03,
-// SSR+0x04, RDR+0x05, SEMR+0x07. Byte-exact via write_sized.
-// TX: TDR write -> console + SSR TDRE/TEND stay set. RX: inject via rx_byte.
+// RA4M1 SCI (UART mode) + clock-synchronous/simple-SPI mode.
+// Real bases: SCI0 0x40070000, stride 0x20; channels 0,1,2,9
+// (BSP_FEATURE_SCI_CHANNELS=0x207). Arduino SPI runs on SCI in SPI
+// mode (r_sci_spi), so this model covers both.
+// Real byte-packed registers: SMR+0x00 (CM b7: 1 = sync/SPI), BRR+0x01,
+// SCR+0x02, TDR+0x03, SSR+0x04, RDR+0x05, SEMR+0x07, SPMR+0x0D
+// (SSE b0 SPI enable, MSS b2 master, CKPOL b6, CKPH b7). Byte-exact
+// via write_sized.
+// UART TX: TDR write -> console + SSR TDRE/TEND stay set. RX: inject
+// via rx_byte. SPI: TDR write (TE=1) shifts a byte out while sampling
+// MISO in: loopback jig (`sci_set_spi_loopback`) echoes MOSI, otherwise
+// MISO reads pulled-up 0xFF; RDRF+RXI land, ORER sticks on overrun.
 // IRQs use ICU event routing (ELC_EVENT_SCI*_RXI/TXI).
 pub const SCI_BASE: u32 = 0x4007_0000; // ch stride 0x20
 
@@ -29,6 +36,7 @@ pub struct RaSci {
     regs: [u8; 0x40],
     rx_buf: Vec<u8>,
     rxi_event: u32, txi_event: u32,
+    base: u32,
 }
 
 impl RaSci {
@@ -38,12 +46,15 @@ impl RaSci {
         regs[0x01] = 0xFF; // BRR reset
         regs[0x03] = 0xFF; // TDR reset
         regs[0x04] = 0x84; // SSR TDRE+TEND
-        Some(Box::new(Self { regs, rx_buf: Vec::new(), rxi_event: rxi, txi_event: txi }))
+        let base = SCI_BASE + (hw_ch as u32) * 0x20;
+        Some(Box::new(Self { regs, rx_buf: Vec::new(), rxi_event: rxi, txi_event: txi, base }))
     }
 
     fn scr(&self) -> u8 { self.regs[0x02] }
     fn ssr(&self) -> u8 { self.regs[0x04] }
     fn set_ssr(&mut self, v: u8) { self.regs[0x04] = v; }
+    /// Clock-synchronous mode (SMR.CM): with SPMR.SSE this is simple-SPI.
+    fn spi_mode(&self) -> bool { self.regs[0x00] & 0x80 != 0 }
 
     fn update_irq(&self, sys: &System) {
         // RIE + RDRF -> RXI, TIE + TDRE -> TXI, via ICU routing.
@@ -60,9 +71,29 @@ impl RaSci {
             0x03 => {
                 // TDR: every write transmits, even same value twice.
                 self.regs[0x03] = v;
-                get_uart_output().lock().unwrap().push(v as char);
-                self.set_ssr(self.ssr() | 0xC0);
-                self.update_irq(sys);
+                if self.spi_mode() {
+                    // Simple-SPI shift (TE gates the clock): MOSI goes
+                    // out while MISO samples in the same clocks.
+                    if self.scr() & (1 << 5) != 0 {
+                        let miso = if crate::system::sci_spi_loopback(self.base) {
+                            v // loopback jig: MOSI tied to MISO
+                        } else {
+                            0xFF // idle bus pulls up
+                        };
+                        if self.ssr() & (1 << 6) != 0 {
+                            self.set_ssr(self.ssr() | (1 << 5)); // ORER
+                        } else {
+                            self.regs[0x05] = miso;
+                            self.set_ssr(self.ssr() | (1 << 6)); // RDRF
+                        }
+                        self.set_ssr(self.ssr() | 0xC0); // TDRE+TEND
+                        self.update_irq(sys);
+                    }
+                } else {
+                    get_uart_output().lock().unwrap().push(v as char);
+                    self.set_ssr(self.ssr() | 0xC0);
+                    self.update_irq(sys);
+                }
             }
             0x02 => {
                 self.regs[0x02] = v;

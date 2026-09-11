@@ -1063,7 +1063,13 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
     if o & 0xFE00 == 0x1C00 {
         let (rd, rn) = ((o & 7) as usize, ((o >> 3) & 7) as usize);
         let im = (o >> 6) & 7;
-        let r = add_flags(cpu, rr(cpu, rn, pc), im, 0);
+        // Predicated (in-IT) preserves flags, like ADD-reg above
+        // (printNumber's `addle` must not kill N before `addgt`'s test).
+        let a = rr(cpu, rn, pc);
+        let r = a.wrapping_add(im);
+        if !cpu.it_pred {
+            let _ = add_flags(cpu, a, im, 0);
+        }
         cpu.regs.r[rd] = r;
         adv(cpu, pc, 2);
         return true;
@@ -1071,7 +1077,12 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
     if o & 0xFE00 == 0x1E00 {
         let (rd, rn) = ((o & 7) as usize, ((o >> 3) & 7) as usize);
         let im = (o >> 6) & 7;
-        let r = sub_flags(cpu, rr(cpu, rn, pc), im, 1);
+        // Predicated (in-IT) preserves flags, like SUB-reg above.
+        let a = rr(cpu, rn, pc);
+        let r = a.wrapping_sub(im);
+        if !cpu.it_pred {
+            let _ = sub_flags(cpu, a, im, 1);
+        }
         cpu.regs.r[rd] = r;
         adv(cpu, pc, 2);
         return true;
@@ -1099,14 +1110,25 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
     }
     if o & 0xF800 == 0x3000 {
         let rd = ((o >> 8) & 7) as usize;
-        let r = add_flags(cpu, rr(cpu, rd, pc), o & 0xFF, 0);
+        // Predicated (in-IT) preserves flags (printNumber's `addle`
+        // must not kill N before the `addgt` else-branch test).
+        let a = rr(cpu, rd, pc);
+        let r = a.wrapping_add(o & 0xFF);
+        if !cpu.it_pred {
+            let _ = add_flags(cpu, a, o & 0xFF, 0);
+        }
         cpu.regs.r[rd] = r;
         adv(cpu, pc, 2);
         return true;
     }
     if o & 0xF800 == 0x3800 {
         let rd = ((o >> 8) & 7) as usize;
-        let r = sub_flags(cpu, rr(cpu, rd, pc), o & 0xFF, 1);
+        // Predicated (in-IT) preserves flags, like SUB-reg above.
+        let a = rr(cpu, rd, pc);
+        let r = a.wrapping_sub(o & 0xFF);
+        if !cpu.it_pred {
+            let _ = sub_flags(cpu, a, o & 0xFF, 1);
+        }
         cpu.regs.r[rd] = r;
         adv(cpu, pc, 2);
         return true;

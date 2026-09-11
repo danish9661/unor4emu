@@ -28,6 +28,7 @@ pub const OPAMP_BASE: u32 = 0x4008_6000;
 pub const ACMPLP_BASE: u32 = 0x4008_5E00;
 pub const CTSU_BASE: u32 = 0x4008_1000;
 pub const CAN0_BASE: u32 = 0x4005_0000;
+pub const IIC0_BASE: u32 = 0x4005_3000;
 pub const USBFS_BASE: u32 = 0x4009_0000;
 
 /// Make a FlatMemory wired for RA4M1 (flash at zero).
@@ -423,6 +424,103 @@ mod tests {
         sys.p.write(sys, CAN0_BASE + 0x828, 1, 0x40); // RECREQ kept, flags cleared
         assert_eq!(sys.p.read(sys, CAN0_BASE + 0x828, 1) & 1, 0, "NEWDATA clear");
         assert_eq!(sys.p.read(sys, CAN0_BASE + 0x842, 2) & 1, 0, "NDST clear");
+    }
+
+    #[test]
+    fn ra4m1_map_i2c_eeprom() {
+        // IIC0 master against the virtual EEPROM slave at 0x50, FSP
+        // blocking-master shaped: START + SLA+W, pointer + two bytes,
+        // STOP; then random-read back (START, SLA+W, pointer, RESTART,
+        // SLA+R, two bytes, NACK + STOP). Ticks ship one byte each.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 13 * 4, 4, 54); // IELSR13 = TXI
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 13);     // ISER0: IRQ13
+        sys.p.write(sys, IIC0_BASE + 0x00, 1, 0x80); // ICE
+        sys.p.write(sys, IIC0_BASE + 0x02, 1, 0x30); // ICMR1 CKS
+        sys.p.write(sys, IIC0_BASE + 0x07, 1, 0xF8); // ICIER: TIE+TEIE+RIE+NAKIE+SPIE
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x62); // MST|TRS|ST
+        sys.tick();
+        assert_ne!(sys.p.read(sys, IIC0_BASE + 0x01, 1) & (1 << 7), 0, "BBSY");
+        let wr = |sys: &crate::system::WasmSystem, b: u32| {
+            sys.p.write(sys, IIC0_BASE + 0x12, 1, b);
+            sys.tick();
+        };
+        wr(sys, 0xA0); // SLA+W to 0x50
+        assert_eq!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & 0x90, 0x80, "TDRE, no NACK");
+        wr(sys, 0x10); // mem pointer
+        wr(sys, 0x55);
+        wr(sys, 0x66);
+        assert!(sys.p.nvic.borrow().has_pending(), "TXI pending");
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x68); // MST|TRS|SP
+        sys.tick();
+        assert_ne!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & (1 << 3), 0, "STOP");
+        assert_ne!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & (1 << 6), 0, "TEND");
+        assert_eq!(sys.p.read(sys, IIC0_BASE + 0x01, 1) & (1 << 7), 0, "bus free");
+        // Random read back.
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x62); // ST
+        sys.tick();
+        wr(sys, 0xA0);
+        wr(sys, 0x10);
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x64); // RS
+        sys.tick();
+        wr(sys, 0xA1); // SLA+R
+        assert_ne!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & (1 << 5), 0, "RDRF");
+        let _ = sys.p.read(sys, IIC0_BASE + 0x13, 1); // dummy slot (FSP RXI discards the stale flag-read the same way)
+        sys.tick(); // first byte streams in now
+        assert_eq!(sys.p.read(sys, IIC0_BASE + 0x13, 1) & 0xFF, 0x55, "byte0");
+        sys.tick();
+        assert_eq!(sys.p.read(sys, IIC0_BASE + 0x13, 1) & 0xFF, 0x66, "byte1");
+        sys.p.write(sys, IIC0_BASE + 0x04, 1, (1 << 3) | (1 << 4)); // ACKBT+NACK
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x68); // SP
+        sys.tick();
+        assert_ne!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & (1 << 3), 0, "STOP2");
+        // Wrong address NACKs and clears by 0.
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x62); // ST
+        sys.tick();
+        wr(sys, 0xC0); // SLA+W to 0x60: nobody home
+        assert_ne!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & (1 << 4), 0, "NACKF");
+        sys.p.write(sys, IIC0_BASE + 0x09, 1, !(1 << 4) & 0xFF);
+        assert_eq!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & (1 << 4), 0, "NACKF clear");
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x68); // SP
+        sys.tick();
+    }
+
+    #[test]
+    fn ra4m1_map_sci_spi_loopback() {
+        // SCI1 in simple-SPI master mode (SMR.CM + SPMR.SSE/MSS, the
+        // Arduino r_sci_spi shape): TDR shifts out while MISO samples
+        // in the same clocks. Loopback jig echoes; open bus reads 0xFF;
+        // overrun sticks ORER and keeps the old byte.
+        const SCI1: u32 = SCI0_BASE + 0x20;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        crate::system::sci_set_spi_loopback(SCI1, true);
+        sys.p.write(sys, SCI1 + 0x00, 1, 0x80); // SMR.CM = sync/SPI
+        sys.p.write(sys, SCI1 + 0x0D, 1, 0x05); // SPMR: SSE + MSS master
+        sys.p.write(sys, SCI1 + 0x02, 1, 0x30); // SCR: TE + RE
+        sys.p.write(sys, SCI1 + 0x03, 1, 0xA5);
+        assert_eq!(sys.p.read(sys, SCI1 + 0x05, 1) & 0xFF, 0xA5, "echo");
+        assert_ne!(sys.p.read(sys, SCI1 + 0x04, 1) & (1 << 6), 0, "RDRF");
+        assert_ne!(sys.p.read(sys, SCI1 + 0x04, 1) & (1 << 7), 0, "TDRE");
+        // Second byte without reading overruns: ORER set, old kept.
+        sys.p.write(sys, SCI1 + 0x03, 1, 0x5A);
+        assert_ne!(sys.p.read(sys, SCI1 + 0x04, 1) & (1 << 5), 0, "ORER");
+        assert_eq!(sys.p.read(sys, SCI1 + 0x05, 1) & 0xFF, 0xA5, "old kept");
+        // Clear flags (write-0), take the new byte.
+        sys.p.write(sys, SCI1 + 0x04, 1, 0x9F);
+        assert_eq!(sys.p.read(sys, SCI1 + 0x04, 1) & 0x60, 0, "flags clear");
+        sys.p.write(sys, SCI1 + 0x03, 1, 0x5A);
+        assert_eq!(sys.p.read(sys, SCI1 + 0x05, 1) & 0xFF, 0x5A, "echo2");
+        // Open bus pulls MISO up.
+        crate::system::sci_set_spi_loopback(SCI1, false);
+        sys.p.write(sys, SCI1 + 0x04, 1, 0x9F);
+        sys.p.write(sys, SCI1 + 0x03, 1, 0x00);
+        assert_eq!(sys.p.read(sys, SCI1 + 0x05, 1) & 0xFF, 0xFF, "pull-up");
     }
 
     fn usb_take_tx(sys: &crate::system::WasmSystem) -> Vec<u8> {
@@ -828,6 +926,132 @@ mod tests {
             }
         }
         assert_eq!(back, msg, "echo mismatch ({}B)", back.len());
+    }
+
+    #[test]
+    fn ra4m1_wire_ok() {
+        // End-to-end Wire EEPROM round-trip on real FSP r_iic_master:
+        // enumerate the Wire sketch, DTR, run the loop, expect "wire-ok"
+        // in the bulk capture (write 0x55/0x66 to slave 0x50:0x10, read
+        // back, compare on-device).
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4wire.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        fn ctl_in_q(
+            sys: &crate::system::WasmSystem,
+            mem: &mut crate::cpu::mem::FlatMemory,
+            cpu: &mut Cpu,
+            req: u16, val: u16, idx: u16, len: u16, want: usize,
+        ) -> Vec<u8> {
+            usb_quiesce(sys, &mut *mem, &mut *cpu);
+            with_usb(sys, |u| u.host_setup(req, val, idx, len));
+            crate::system::icu_raise_event(sys, 51);
+            let mut got = Vec::new();
+            let mut budget = 4_000_000u32;
+            while budget > 0 && got.len() < want {
+                let n = budget.min(48_000);
+                cpu.run(sys, mem, n);
+                sys.tick();
+                assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+                got.extend(usb_take_tx(sys));
+                budget -= n;
+            }
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            with_usb(sys, |u| u.host_status_done());
+            crate::system::icu_raise_event(sys, 51);
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            got.extend(usb_take_tx(sys));
+            got
+        }
+        let dev = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0100, 0, 18, 18);
+        assert_eq!((dev[0], dev[1]), (18, 1), "DEVICE descriptor");
+        ctl_out(sys, &mut mem, &mut cpu, 0x0500, 5, 0, &[]);
+        let cfg9 = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, 9, 9);
+        let total = u16::from_le_bytes([cfg9[2], cfg9[3]]) as usize;
+        let cfg = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, total as u16, total);
+        assert_eq!(cfg.len(), total);
+        ctl_out(sys, &mut mem, &mut cpu, 0x0900, 1, 0, &[]);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2021, 0, 0,
+            &[0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08]);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2221, 3, 0, &[]);
+
+        // The sketch does one round-trip in setup(), then idles.
+        let mut all = Vec::new();
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            all.extend(usb_take_tx(sys));
+            if all.windows(7).any(|w| w == b"wire-ok" || w == b"wire-ng") {
+                break;
+            }
+        }
+        let s = String::from_utf8_lossy(&all);
+        assert!(s.contains("wire-ok"), "no wire-ok in {:?}..", &all[..all.len().min(96)]);
+    }
+
+    // CPU: predicated T1 ADD/SUB-immediate preserves flags (printNumber's
+    // `ite le; addle r3,#48; addgt r3,#55` must not execute both arms:
+    // addle must not kill N before addgt's test). Mirrors the existing
+    // MOVS/ADD-reg/SUB-reg it_pred rule in the decoder.
+    #[test]
+    fn ra4m1_ite_add_imm_preserves_flags() {
+        // Exact printNumber core for digit 4 (r3 starts 0 here instead of
+        // the uxtb'd remainder, so correct is 0+48 = 48, not 52).
+        // Both-arms bug gave 0+48+55 = 103.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut mem = ra4m1_memory();
+        let mut img = vec![0u8; 0x200];
+        img[0..4].copy_from_slice(&0x20008000u32.to_le_bytes());
+        img[4..8].copy_from_slice(&0x00000101u32.to_le_bytes());
+        let code: [u16; 12] = [
+            0x2300, // movs r3, #0
+            0x2604, // movs r6, #4
+            0x220A, // movs r2, #10
+            0xFBB6, 0xF5F2, // udiv r5, r6, r2
+            0xFB02, 0x6415, // mls r4, r2, r5, r6
+            0x2C09, // cmp r4, #9
+            0xBFD4, // ite le
+            0x3330, // add r3, #48
+            0x3337, // add r3, #55
+            0xE7FE, // b .
+        ];
+        for (i, w) in code.iter().enumerate() {
+            img[0x100 + i * 2] = (w & 0xFF) as u8;
+            img[0x100 + i * 2 + 1] = (w >> 8) as u8;
+        }
+        mem.load(&img, FLASH_BASE);
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 20);
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(cpu.regs.r[3], 48, "ITE both-arms? r4={} r5={}", cpu.regs.r[4], cpu.regs.r[5]);
+        assert_eq!(cpu.regs.r[4], 4, "mls");
+        assert_eq!(cpu.regs.r[5], 0, "udiv");
     }
 
     #[test]

@@ -157,6 +157,26 @@ pub fn ctsu_get_override(channel: u32) -> Option<u32> {
     ctsu_overrides().lock().unwrap().get(&channel).copied()
 }
 
+// ── SCI-SPI loopback jig (MOSI tied to MISO) ───────────────────────────────
+// Keyed by SCI base address. Off by default (idle MISO reads pulled-up
+// 0xFF, like a real unterminated bus); tests enable it per channel.
+static SCI_SPI_LOOPBACK: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+
+fn sci_spi_loopback_set() -> &'static Mutex<std::collections::HashSet<u32>> {
+    SCI_SPI_LOOPBACK.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+pub fn sci_set_spi_loopback(base: u32, on: bool) {
+    let mut m = sci_spi_loopback_set().lock().unwrap();
+    if on {
+        m.insert(base);
+    } else {
+        m.remove(&base);
+    }
+}
+pub fn sci_spi_loopback(base: u32) -> bool {
+    sci_spi_loopback_set().lock().unwrap().contains(&base)
+}
+
 // ── RA ICU event routing (IELSR mirror) ────────────────────────────────────
 // The RA ICU maps peripheral events to NVIC IRQs at runtime via IELSRn.
 // Peripherals raise EVENTS here; every IRQ whose IELSR selects that event
@@ -311,6 +331,7 @@ pub fn reset_globals() {
     if let Some(m) = UART_OUTPUT.get() { m.lock().unwrap().clear(); }
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CTSU_OVERRIDES.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = SCI_SPI_LOOPBACK.get() { m.lock().unwrap().clear(); }
     icu_reset_mirror();
     for i in 0..8 {
         DMA_COMPLETED[i].store(false, Relaxed);
