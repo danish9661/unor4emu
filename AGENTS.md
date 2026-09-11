@@ -179,3 +179,15 @@ at zero executes shifted garbage (looks plausible, faults in an epilogue).
 `core/blinky/r4wire.bin` (Wire EEPROM round-trip) and
 `core/blinky/r4spi.bin` (SPI loopback) are the vendored USB/I2C/SPI
 proof builds, compiled the same way from their sketches.
+
+## 8. Browser demo (`demo/`)
+
+`./demo/build.sh` then `python3 -m http.server -d demo 8901`: dark
+single page driving the 228KB Minima WASM (`WasmCpu` + the `usb_*` /
+`periph_*` free functions - no new exports needed). Three tabs run the
+vendored firmware live: Blink (LED + full 12x16 GPIO grid from PORT),
+Serial (in-page virtual-host enumeration with step checklist, hello in
+the terminal), Echo (bulk-pipe discovery via PIPECFG + typed round-
+trip). `demo/pkg/` + `demo/fw/` are generated (git-ignored); only
+`index.html`/`app.js`/`styles.css`/`build.sh` are tracked. Verified
+with Playwright screenshots (`shot1`-`shot4` pattern), console clean.

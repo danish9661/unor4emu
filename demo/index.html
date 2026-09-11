@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UNO R4 Minima — In-Browser Emulator</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="bg-grid"></div>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">R4</div>
+    <div>
+      <h1>Arduino UNO R4 <span>Minima</span></h1>
+      <p class="sub">cycle-driven RA4M1 emulator &middot; Rust + WebAssembly</p>
+    </div>
+  </div>
+  <div class="badges">
+    <span class="badge">R7FA4M1AB3CFM</span>
+    <span class="badge">Cortex-M4F @ 48MHz</span>
+    <span class="badge ok">157 proofs green</span>
+    <span class="badge" id="wasm-size">228 KB wasm</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="card board-card">
+    <div class="card-title">Board <span id="run-state" class="state paused">paused</span></div>
+    <div class="board-wrap">
+      <svg class="board" viewBox="0 0 340 240" role="img" aria-label="UNO R4 Minima board">
+        <defs>
+          <radialGradient id="g">
+            <stop offset="0%" stop-color="#ffb02e" stop-opacity="0.9"/>
+            <stop offset="100%" stop-color="#ffb02e" stop-opacity="0"/>
+          </radialGradient>
+        </defs>        <rect x="8" y="8" width="324" height="224" rx="14" class="pcb"/>
+        <rect x="8" y="8" width="324" height="224" rx="14" class="pcb-edge"/>
+        <text x="30" y="44" class="silk big">UNO R4</text>
+        <text x="30" y="62" class="silk">MINIMA &middot; RA4M1</text>
+        <!-- USB-C -->
+        <rect x="140" y="2" width="60" height="18" rx="6" class="usb"/>
+        <rect x="148" y="7" width="44" height="8" rx="3" class="usb-hole"/>
+        <!-- pin headers -->
+        <g class="pins" id="hdr-top"></g>
+        <g class="pins" id="hdr-bottom"></g>
+        <!-- reset button -->
+        <rect x="292" y="30" width="22" height="12" rx="3" class="btn"/>
+        <!-- main LED -->
+        <circle id="led-main" cx="120" cy="150" r="17" class="led off"/>
+        <circle id="led-glow" cx="120" cy="150" r="26" class="glow off"/>
+        <text x="120" y="185" class="silk tiny" text-anchor="middle">LED &middot; D13</text>
+        <!-- tx/rx leds -->
+        <circle id="led-tx" cx="180" cy="150" r="8" class="led small off"/>
+        <text x="180" y="185" class="silk tiny" text-anchor="middle">TX</text>
+        <circle id="led-rx" cx="212" cy="150" r="8" class="led small off"/>
+        <text x="212" y="185" class="silk tiny" text-anchor="middle">RX</text>
+        <!-- mcu -->
+        <rect x="240" y="120" width="64" height="64" rx="4" class="mcu"/>
+        <text x="272" y="150" class="silk tiny" text-anchor="middle">RA4M1</text>
+        <text x="272" y="164" class="silk tiny" text-anchor="middle">48 MHz</text>
+      </svg>
+    </div>
+    <div class="stats">
+      <div class="stat"><label>instructions</label><span id="stat-steps">0</span></div>
+      <div class="stat"><label>PC</label><span id="stat-pc" class="mono">-</span></div>
+      <div class="stat"><label>fault</label><span id="stat-fault" class="mono ok">none</span></div>
+    </div>
+    <div class="gpio">
+      <div class="card-title small">GPIO &middot; live PORT output</div>
+      <div id="gpio-grid" class="gpio-grid"></div>
+    </div>
+  </section>
+
+  <section class="card io-card">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="blink" role="tab">Blink</button>
+      <button class="tab" data-tab="serial" role="tab">Serial</button>
+      <button class="tab" data-tab="echo" role="tab">Echo</button>
+    </div>
+
+    <div class="tabpane active" id="pane-blink">
+      <p class="desc">Real ArduinoCore <span class="mono">Blink.ino</span> (FSP + millis from AGT0 1&nbsp;ms IRQs) running on the core. The LED and pin grid follow the actual PORT registers.</p>
+      <div class="row">
+        <button id="btn-blink-run" class="btn-acc">Run Blink</button>
+        <button id="btn-pause" class="btn-ghost">Pause</button>
+        <button id="btn-reset" class="btn-ghost">Reset</button>
+      </div>
+      <label class="slider">speed <input id="speed" type="range" min="1" max="24" value="8"> <span id="speed-v">8</span> chunks/frame</label>
+    </div>
+
+    <div class="tabpane" id="pane-serial">
+      <p class="desc">Real <span class="mono">Serial</span> sketch over emulated USBFS: the page plays virtual host (attach &rarr; reset &rarr; descriptors &rarr; line coding &rarr; DTR), then <span class="mono">Serial.println("hello")</span> lands here.</p>
+      <div class="row">
+        <button id="btn-serial-run" class="btn-acc">Enumerate &amp; run</button>
+        <button id="btn-serial-stop" class="btn-ghost">Stop</button>
+      </div>
+      <ol id="enum-steps" class="enum"></ol>
+      <div id="term" class="term" aria-live="polite"></div>
+    </div>
+
+    <div class="tabpane" id="pane-echo">
+      <p class="desc">Echo sketch: bytes you send travel host &rarr; bulk-OUT &rarr; <span class="mono">Serial.read</span> &rarr; <span class="mono">Serial.write</span> &rarr; bulk-IN &rarr; back here. Pipes are discovered from PIPECFG like a real host.</p>
+      <div class="row">
+        <button id="btn-echo-run" class="btn-acc">Enumerate echo</button>
+      </div>
+      <div class="row">
+        <input id="echo-in" class="textin" placeholder="type bytes to echo…" maxlength="120" disabled>
+        <button id="btn-echo-send" class="btn-acc" disabled>Send</button>
+      </div>
+      <div id="echo-log" class="term small"></div>
+    </div>
+
+    <div id="banner" class="banner hidden"></div>
+  </section>
+</main>
+
+<footer>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (157 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

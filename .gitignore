@@ -3,5 +3,6 @@ target/
 *.wasm
 *.wat
 pkg/
+demo/fw/
 node_modules/
 .pw-scratch/
