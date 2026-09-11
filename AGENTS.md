@@ -7,7 +7,7 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 145) and `cargo build` green in the
+  `core/ra4m1-periph-wasm` (currently 147) and `cargo build` green in the
   top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -74,7 +74,7 @@ wasm wrappers can path-depend on it).
 | GPT0-7 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven (0-1: 32-bit) |
 | AGT0-1 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` 16-bit count |
 | ACMPLP/OPAMP | `0x4008_5E00`/`0x4008_6000` | `ra_opamp.rs` loopback + compare |
-| USBFS | `0x4009_0000` | `ra_usb.rs` retain file (endpoints later) |
+| USBFS | `0x4009_0000` | `ra_usb.rs` endpoint FIFOs + TX capture + IRQs |
 | ARM | `0xE000_xxxx` | reuse NVIC/SysTick/SCB/MPU/FPU/DWT/STIR/ITM |
 
 `Peripherals::new_ra4m1()` builds this map. `WasmSystem::new_ra4m1()` +
@@ -101,7 +101,8 @@ wasm wrappers can path-depend on it).
   layout), SCI UART (TX console, RX inject, TXI/RXI events), GPT
   (count/compare/event), ADC14 (ADST=bit15, HW-cleared), DAC12, RTC,
   DMAC/DTC memcopy, AGT down-counter (latched reload, TUNDF, underflow
-  events), WDT/IWDT, CRC, DOC, OPAMP/ACMP, USBFS retain file,
+  events), WDT/IWDT, CRC, DOC, OPAMP/ACMP, USBFS endpoint FIFOs + TX
+  capture + IRQs (virtual-host enumeration proven against TinyUSB),
   `ra4m1_memory()` flash-at-zero, `WasmCpu::new_ra4m1()`, Arduino Blink
   boots AND toggles the LED (AGT0 1ms IRQs drive millis).
 - Hard-won truths: RA4M1 bases differ from RA6 everywhere (this §3 is from
@@ -125,7 +126,8 @@ wasm wrappers can path-depend on it).
 `ra4m1_map_elc_routes_software_event`, `ra4m1_map_agt_counts`,
 `ra4m1_map_crc_and_doc`, `ra4m1_map_sci_echo_path`,
 `ra4m1_map_opamp_follower_and_acmp`, `ra4m1_arduino_blink_boots`,
-`ra4m1_arduino_blink_toggles_led`.
+`ra4m1_arduino_blink_toggles_led`, `ra4m1_map_usb_tx_reaches_capture`,
+`ra4m1_usb_enumerates_cdc`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
 

@@ -26,6 +26,7 @@ pub const CRC_BASE: u32 = 0x4007_4000;
 pub const DOC_BASE: u32 = 0x4005_4100;
 pub const OPAMP_BASE: u32 = 0x4008_6000;
 pub const ACMPLP_BASE: u32 = 0x4008_5E00;
+pub const USBFS_BASE: u32 = 0x4009_0000;
 
 /// Make a FlatMemory wired for RA4M1 (flash at zero).
 pub fn ra4m1_memory() -> crate::cpu::mem::FlatMemory {
@@ -341,6 +342,177 @@ mod tests {
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 1);
         sys.p.write(sys, ACMPLP_BASE + 0x10, 4, 0x100);
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 0);
+    }
+
+    fn usb_take_tx(sys: &crate::system::WasmSystem) -> Vec<u8> {
+        for slot in sys.p.peripherals.iter() {
+            if slot.start == USBFS_BASE {
+                if let Some(u) = slot.peripheral.borrow_mut().as_any_mut()
+                    .downcast_mut::<crate::peripherals::ra_usb::RaUsb>() {
+                    return std::mem::take(&mut u.tx_capture);
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn with_usb(sys: &crate::system::WasmSystem, f: impl FnOnce(&mut crate::peripherals::ra_usb::RaUsb)) {
+        for slot in sys.p.peripherals.iter() {
+            if slot.start == USBFS_BASE {
+                let mut b = slot.peripheral.borrow_mut();
+                if let Some(u) = b.as_any_mut().downcast_mut::<crate::peripherals::ra_usb::RaUsb>() {
+                    f(u);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Run firmware with IRQs until `cond` holds or budget exhausts.
+    fn run_until(
+        sys: &crate::system::WasmSystem,
+        mem: &mut crate::cpu::mem::FlatMemory,
+        cpu: &mut Cpu,
+        mut budget: u32,
+        cond: impl Fn() -> bool,
+    ) {
+        while budget > 0 && !cond() {
+            let n = budget.min(48_000);
+            cpu.run(sys, mem, n);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            budget -= n;
+        }
+    }
+
+    #[test]
+    fn ra4m1_usb_enumerates_cdc() {
+        // Virtual-host enumeration of the real TinyUSB stack in Blink:
+        // attach -> reset -> GET_DEV -> SET_ADDR -> GET_CFG -> SET_CONFIG.
+        // The firmware's dcd/usbd does everything else through the model.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4blink.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        // Boot through USB init, then attach + reset.
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || {
+            usb_take_tx(sys);
+            false
+        });
+        with_usb(sys, |u| u.host_set_dvst(1)); // DEF
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        // Helper: one control-IN transfer, returns device bytes.
+        fn ctl_in(
+            sys: &crate::system::WasmSystem,
+            mem: &mut crate::cpu::mem::FlatMemory,
+            cpu: &mut Cpu,
+            req: u16, val: u16, idx: u16, len: u16, want: usize,
+        ) -> Vec<u8> {
+            with_usb(sys, |u| u.host_setup(req, val, idx, len));
+            crate::system::icu_raise_event(sys, 51);
+            let mut got = Vec::new();
+            let mut budget = 4_000_000u32;
+            while budget > 0 && got.len() < want {
+                let n = budget.min(48_000);
+                cpu.run(sys, mem, n);
+                sys.tick();
+                assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+                got.extend(usb_take_tx(sys));
+                budget -= n;
+            }
+            // Status stage: let the device complete, then tell it status is done.
+            let mut budget = 2_000_000u32;
+            while budget > 0 {
+                let n = budget.min(48_000);
+                cpu.run(sys, mem, n);
+                sys.tick();
+                budget -= n;
+            }
+            with_usb(sys, |u| u.host_status_done());
+            crate::system::icu_raise_event(sys, 51);
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            got.extend(usb_take_tx(sys));
+            got
+        }
+
+        // GET_DESCRIPTOR device (18 bytes: bLength=18, type=DEVICE=1).
+        let dev = ctl_in(sys, &mut mem, &mut cpu, 0x0680, 0x0100, 0, 18, 18);
+        assert_eq!(dev.len(), 18, "dev desc {:?}", dev);
+        assert_eq!(dev[0], 18);
+        assert_eq!(dev[1], 1);
+
+        // SET_ADDRESS 5: setup -> device status (CCPL) -> done. The stack
+        // tracks `addressed` in software; USBADDR latching is SIE business
+        // (no firmware writes it - verified in dcd_rusb2.c).
+        with_usb(sys, |u| u.host_setup(0x0500, 5, 0, 0));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_status_done());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 2_000_000, || false);
+
+        // GET_DESCRIPTOR configuration (first 9, then full).
+        let cfg9 = ctl_in(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, 9, 9);
+        assert_eq!(cfg9.len(), 9, "cfg9 {:?}", cfg9);
+        assert_eq!(cfg9[1], 2); // CONFIGURATION
+        let total = u16::from_le_bytes([cfg9[2], cfg9[3]]) as usize;
+        assert!(total > 9 && total < 512, "total {}", total);
+        let cfg = ctl_in(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, total as u16, total);
+        assert_eq!(cfg.len(), total, "cfg {:?}..", &cfg[..cfg.len().min(16)]);
+
+        // SET_CONFIGURATION 1.
+        with_usb(sys, |u| u.host_setup(0x0900, 1, 0, 0));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_status_done());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 2_000_000, || false);
+        assert!(cpu.fault.is_none());
+    }
+
+    #[test]
+    fn ra4m1_map_usb_tx_reaches_capture() {
+        // Scripted TinyUSB-style bulk-IN on pipe 1 via D0FIFO: select, wait
+        // CURPIPE/FRDY, write packet, BVAL -> capture + BEMP + IRQ.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // Enable BRDY+BEMP interrupts, map USBFS_INT (51) to IRQ10.
+        sys.p.write(sys, USBFS_BASE + 0x30, 2, (1 << 8) | (1 << 10));
+        sys.p.write(sys, 0x4000_6300 + 10 * 4, 4, 51);
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 10);
+        // Select pipe 1, 16-bit access.
+        sys.p.write(sys, USBFS_BASE + 0x28, 2, 1 | (1 << 10));
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x28, 2) & 0xF, 1);
+        assert_ne!(sys.p.read(sys, USBFS_BASE + 0x2A, 2) & (1 << 13), 0);
+        // Write "Hi" + BVAL.
+        sys.p.write(sys, USBFS_BASE + 0x18, 2, 0x6948);
+        sys.p.write(sys, USBFS_BASE + 0x2A, 2, 1 << 15);
+        // BEMP latched, IN buffer drained, IRQ pending, bytes captured.
+        assert_ne!(sys.p.read(sys, USBFS_BASE + 0x4A, 2) & (1 << 1), 0);
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x70, 2) & (1 << 14), 0);
+        assert!(sys.p.nvic.borrow().has_pending());
+        assert_eq!(usb_take_tx(sys), b"Hi");
+        // Write-0 clears the status bit.
+        sys.p.write(sys, USBFS_BASE + 0x4A, 2, !(1 << 1) & 0xFFFF);
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x4A, 2) & (1 << 1), 0);
     }
 
     #[test]

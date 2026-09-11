@@ -111,6 +111,68 @@ pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()
 }
 
+/// Drain captured USB TX bytes (virtual-host sink) since last call.
+#[wasm_bindgen]
+pub fn usb_take_tx() -> Vec<u8> {
+    let p = sys().p.clone();
+    for slot in &p.peripherals {
+        if slot.start == crate::ra4m1::USBFS_BASE {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(u) = b.as_any_mut().downcast_mut::<peripherals::ra_usb::RaUsb>() {
+                return std::mem::take(&mut u.tx_capture);
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn with_usb(f: impl FnOnce(&mut peripherals::ra_usb::RaUsb)) {
+    let p = sys().p.clone();
+    for slot in &p.peripherals {
+        if slot.start == crate::ra4m1::USBFS_BASE {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(u) = b.as_any_mut().downcast_mut::<peripherals::ra_usb::RaUsb>() {
+                f(u);
+                return;
+            }
+        }
+    }
+}
+
+/// Virtual-host: attach with VBUS.
+#[wasm_bindgen]
+pub fn usb_host_attach() {
+    with_usb(|u| u.host_attach());
+    crate::system::icu_raise_event(sys(), 51);
+}
+
+/// Virtual-host: bus reset (DVST + DVSQ=DEF).
+#[wasm_bindgen]
+pub fn usb_host_reset() {
+    with_usb(|u| u.host_set_dvst(1));
+    crate::system::icu_raise_event(sys(), 51);
+}
+
+/// Virtual-host: deliver a SETUP packet (CTRT + stage=RDATA).
+#[wasm_bindgen]
+pub fn usb_host_setup(req: u16, val: u16, idx: u16, len: u16) {
+    with_usb(|u| u.host_setup(req, val, idx, len));
+    crate::system::icu_raise_event(sys(), 51);
+}
+
+/// Virtual-host: status-stage completion (CTRT + stage idle).
+#[wasm_bindgen]
+pub fn usb_host_status_done() {
+    with_usb(|u| u.host_status_done());
+    crate::system::icu_raise_event(sys(), 51);
+}
+
+/// Virtual-host: queue received bytes on a pipe (Serial.read path).
+#[wasm_bindgen]
+pub fn usb_rx_inject(pipe: u8, data: &[u8]) {
+    with_usb(|u| u.rx_inject(pipe as usize, data));
+}
+
 use cpu::{Cpu, mem::{FlatMemory, Memory}};
 #[wasm_bindgen]
 pub struct WasmCpu { cpu: Cpu, mem: FlatMemory }
