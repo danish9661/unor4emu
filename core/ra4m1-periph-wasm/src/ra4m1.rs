@@ -368,6 +368,29 @@ mod tests {
         }
     }
 
+    /// Run until the USB link is quiescent (no pending IRQ, no latched
+    /// CTRT): real hosts never pipeline a new SETUP over an unfinished
+    /// transfer, and neither must this driver.
+    fn usb_quiesce(
+        sys: &crate::system::WasmSystem,
+        mem: &mut crate::cpu::mem::FlatMemory,
+        cpu: &mut Cpu,
+    ) {
+        let mut budget = 4_000_000u32;
+        while budget > 0 {
+            let busy = sys.p.nvic.borrow().has_pending()
+                || sys.p.read(sys, USBFS_BASE + 0x40, 2) & (1 << 11) != 0;
+            if !busy {
+                break;
+            }
+            let n = budget.min(48_000);
+            cpu.run(sys, mem, n);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            budget -= n;
+        }
+    }
+
     /// Run firmware with IRQs until `cond` holds or budget exhausts.
     fn run_until(
         sys: &crate::system::WasmSystem,
@@ -424,6 +447,7 @@ mod tests {
             cpu: &mut Cpu,
             req: u16, val: u16, idx: u16, len: u16, want: usize,
         ) -> Vec<u8> {
+            usb_quiesce(sys, &mut *mem, &mut *cpu);
             with_usb(sys, |u| u.host_setup(req, val, idx, len));
             crate::system::icu_raise_event(sys, 51);
             let mut got = Vec::new();
@@ -462,10 +486,7 @@ mod tests {
         // (no firmware writes it - verified in dcd_rusb2.c).
         with_usb(sys, |u| u.host_setup(0x0500, 5, 0, 0));
         crate::system::icu_raise_event(sys, 51);
-        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
-        with_usb(sys, |u| u.host_status_done());
-        crate::system::icu_raise_event(sys, 51);
-        run_until(sys, &mut mem, &mut cpu, 2_000_000, || false);
+        run_until(sys, &mut mem, &mut cpu, 6_000_000, || false);
 
         // GET_DESCRIPTOR configuration (first 9, then full).
         let cfg9 = ctl_in(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, 9, 9);
@@ -476,14 +497,128 @@ mod tests {
         let cfg = ctl_in(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, total as u16, total);
         assert_eq!(cfg.len(), total, "cfg {:?}..", &cfg[..cfg.len().min(16)]);
 
-        // SET_CONFIGURATION 1.
+        // SET_CONFIGURATION 1 (device self-completes status).
+        usb_quiesce(sys, &mut mem, &mut cpu);
         with_usb(sys, |u| u.host_setup(0x0900, 1, 0, 0));
         crate::system::icu_raise_event(sys, 51);
-        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
-        with_usb(sys, |u| u.host_status_done());
-        crate::system::icu_raise_event(sys, 51);
-        run_until(sys, &mut mem, &mut cpu, 2_000_000, || false);
+        run_until(sys, &mut mem, &mut cpu, 6_000_000, || false);
         assert!(cpu.fault.is_none());
+        assert_eq!(mem.read8(0x20000C8D + 1), 1, "not configured");
+    }
+
+    /// One control-OUT transfer. The OUT data stage is fed AFTER the setup
+    /// is processed (the dcd clears the FIFO on setup receipt, like HW, so
+    /// feeding beforehand would be wiped). Status is device-driven.
+    fn ctl_out(
+        sys: &crate::system::WasmSystem,
+        mem: &mut crate::cpu::mem::FlatMemory,
+        cpu: &mut Cpu,
+        req: u16, val: u16, idx: u16, data: &[u8],
+    ) {
+        usb_quiesce(sys, &mut *mem, &mut *cpu);
+        with_usb(sys, |u| u.host_setup(req, val, idx, data.len() as u16));
+        crate::system::icu_raise_event(sys, 51);
+        // Let the firmware arm the OUT stage first (setup -> BCLR passes).
+        run_until(sys, mem, cpu, 2_000_000, || false);
+        if !data.is_empty() {
+            with_usb(sys, |u| u.rx_inject(0, data));
+            crate::system::icu_raise_event(sys, 51);
+        }
+        run_until(sys, mem, cpu, 6_000_000, || false);
+    }
+
+    #[test]
+    fn ra4m1_usb_serial_hello() {
+        // End-to-end Serial.print: enumerate the Serial sketch, do CDC line
+        // coding + DTR, run the loop, expect "hello" in the bulk capture.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4serial.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        // Standard enumeration (short budgets: device is already up).
+        fn ctl_in_q(
+            sys: &crate::system::WasmSystem,
+            mem: &mut crate::cpu::mem::FlatMemory,
+            cpu: &mut Cpu,
+            req: u16, val: u16, idx: u16, len: u16, want: usize,
+        ) -> Vec<u8> {
+            usb_quiesce(sys, &mut *mem, &mut *cpu);
+            with_usb(sys, |u| u.host_setup(req, val, idx, len));
+            crate::system::icu_raise_event(sys, 51);
+            let mut got = Vec::new();
+            let mut budget = 4_000_000u32;
+            while budget > 0 && got.len() < want {
+                let n = budget.min(48_000);
+                cpu.run(sys, mem, n);
+                sys.tick();
+                assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+                got.extend(usb_take_tx(sys));
+                budget -= n;
+            }
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            with_usb(sys, |u| u.host_status_done());
+            crate::system::icu_raise_event(sys, 51);
+            run_until(sys, mem, cpu, 2_000_000, || false);
+            got.extend(usb_take_tx(sys));
+            got
+        }
+        let dev = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0100, 0, 18, 18);
+        assert_eq!(dev.len(), 18, "dev desc {:?}", dev);
+        assert_eq!((dev[0], dev[1]), (18, 1), "DEVICE descriptor");
+        ctl_out(sys, &mut mem, &mut cpu, 0x0500, 5, 0, &[]);
+        let cfg9 = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, 9, 9);
+        assert_eq!(cfg9.len(), 9, "cfg9 {:?}", cfg9);
+        assert_eq!(cfg9[1], 2, "CONFIGURATION descriptor");
+        let total = u16::from_le_bytes([cfg9[2], cfg9[3]]) as usize;
+        assert!(total > 9 && total < 512, "total {}", total);
+        let cfg = ctl_in_q(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, total as u16, total);
+        assert_eq!(cfg.len(), total, "cfg {:?}..", &cfg[..cfg.len().min(16)]);
+        ctl_out(sys, &mut mem, &mut cpu, 0x0900, 1, 0, &[]);
+
+        // CDC bring-up: GET_LINE_CODING returns the default 115200 8N1,
+        // SET_LINE_CODING programs 9600 8N1 (re-read proves the OUT data
+        // stage landed), SET_CONTROL_LINE_STATE asserts DTR+RTS.
+        let coding = ctl_in_q(sys, &mut mem, &mut cpu, 0x21A1, 0, 0, 7, 7);
+        assert_eq!(coding.len(), 7, "line coding {:?}", coding);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2021, 0, 0,
+            &[0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08]);
+        let coding = ctl_in_q(sys, &mut mem, &mut cpu, 0x21A1, 0, 0, 7, 7);
+        assert_eq!(coding, vec![0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08],
+            "9600 8N1 not stored {:?}", coding);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2221, 3, 0, &[]);
+
+        // Run the loop; the sketch prints every ~400ms.
+        let mut all = Vec::new();
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            all.extend(usb_take_tx(sys));
+            if all.windows(7).any(|w| w == b"hello\r\n" || w == b"hello\n") {
+                break;
+            }
+        }
+        let s = String::from_utf8_lossy(&all);
+        assert!(s.contains("hello"), "no hello in {:?}..", &all[..all.len().min(64)]);
     }
 
     #[test]

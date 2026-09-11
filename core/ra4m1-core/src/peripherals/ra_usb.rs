@@ -67,10 +67,13 @@ impl RaUsb {
     }
 
     /// Queue received bytes on a pipe (virtual-host RX for Serial.read /
-    /// control OUT stages). DTLN reflects them; FIFO reads drain.
+    /// control OUT stages). DTLN reflects them; FIFO reads drain. Sets the
+    /// BRDY flag like HW does on packet arrival (the stack reads OUT data
+    /// in its BRDY path, after the setup-stage BCLR has passed).
     pub fn rx_inject(&mut self, pipe: usize, data: &[u8]) {
         if pipe < 10 {
             self.rx_buf[pipe].extend_from_slice(data);
+            self.brdy |= 1 << pipe;
         }
     }
 
@@ -211,17 +214,30 @@ impl Peripheral for RaUsb {
         // right-shifts sub-word reads into place).
         match offset {
             0x14 | 0x18 | 0x1C => {
-                // FIFO port read: pop 16 bits from the selected pipe RX buf.
-                let sel = match offset {
-                    0x14 => self.sel(0x20),
-                    0x18 => self.sel(0x28),
-                    _ => self.sel(0x2C),
+                // FIFO port read: pop from the selected pipe RX buf. The
+                // dcd always drains OUT data with byte accesses
+                // (pipe_read_packet: MBW_8BIT, LDRB per byte), so in 8-bit
+                // mode pop exactly one byte per read - popping a pair
+                // silently drops every odd byte (seen as garbled
+                // SET_LINE_CODING on re-read).
+                let sel_reg = match offset {
+                    0x14 => 0x20,
+                    0x18 => 0x28,
+                    _ => 0x2C,
                 };
+                let sel = self.sel(sel_reg);
+                let mbw16 = self.regs.get(&sel_reg).copied().unwrap_or(0) & 0xC00 != 0;
                 if sel >= 10 || self.rx_buf[sel].is_empty() {
+                    if std::env::var("USBLOG2").is_ok() {
+                        eprintln!("USBLOG2 fifo-rd empty sel={}", sel);
+                    }
                     return 0;
                 }
                 let b0 = self.rx_buf[sel].remove(0) as u32;
-                let b1 = if self.rx_buf[sel].is_empty() { 0 } else { self.rx_buf[sel].remove(0) as u32 };
+                let b1 = if mbw16 && !self.rx_buf[sel].is_empty() { self.rx_buf[sel].remove(0) as u32 } else { 0 };
+                if std::env::var("USBLOG2").is_ok() {
+                    eprintln!("USBLOG2 fifo-rd sel={} {:02x}{:02x} left={}", sel, b0, b1, self.rx_buf[sel].len());
+                }
                 b0 | (b1 << 8)
             }
             0x20 | 0x28 | 0x2C => {
@@ -240,9 +256,19 @@ impl Peripheral for RaUsb {
                 let hi = self.regs.get(&0x42).copied().unwrap_or(0) & 0xFFFF;
                 self.intsts0() | (hi << 16)
             }
+            0x08 => {
+                // DVSTCTR0: RHST[2:0] live-reads full-speed (the virtual
+                // link is always FS); process_bus_reset switches on it to
+                // report speed to the stack - reading 0 silently aborts
+                // the whole bus-reset path (TU_ASSERT is a no-op in release).
+                (self.regs.get(&0x08).copied().unwrap_or(0) & !7) | 2
+            }
             // Setup packet block: the dcd reads these as 32-bit pairs
             // (LDRD), so serve both halves together.
             0x54 => {
+                if std::env::var("USBLOG2").is_ok() {
+                    eprintln!("USBLOG2 setup-read");
+                }
                 self.regs.get(&0x54).copied().unwrap_or(0) & 0xFFFF
                     | ((self.regs.get(&0x56).copied().unwrap_or(0) & 0xFFFF) << 16)
             }
@@ -288,6 +314,9 @@ impl Peripheral for RaUsb {
         self.write_sized(sys, offset, value, 0, 4);
     }
     fn write_sized(&mut self, sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        if std::env::var("USBLOG2").is_ok() && (0x60..0x84).contains(&(offset & !3)) {
+            eprintln!("USBLOG2 wr off={:#x} val={:#x} bo={} sz={}", offset, value, byte_offset, size);
+        }
         // FIFO ports: append `size` low bytes to the selected pipe TX buffer,
         // auto-flushing full MPS packets like HW.
         if offset == 0x14 || offset == 0x18 || offset == 0x1C {
@@ -348,7 +377,8 @@ impl Peripheral for RaUsb {
             0x58 => {
                 self.regs.insert(0x58, w & 0xFFFF);
                 self.regs.insert(0x5A, (w >> 16) & 0xFFFF);
-            }            // BRDYSTS (high half of 0x44) / BEMPSTS (high half of 0x48):
+            }
+            // BRDYSTS (high half of 0x44) / BEMPSTS (high half of 0x48):
             // write 0 clears, write 1 ignored.
             0x44 => {
                 self.brdy &= (w >> 16) as u16;
@@ -358,16 +388,23 @@ impl Peripheral for RaUsb {
             }
             // INTSTS0: clear latched device events (VALID readable).
             0x40 => {
+                if std::env::var("USBLOG2").is_ok() {
+                    eprintln!("USBLOG2 intsts0 wr {:08x}", w);
+                }
                 self.intsts0_write((w & 0xFFFF) as u16);
                 self.regs.insert(0x42, (w >> 16) & 0xFFFF);
             }
-            // DCPCTR: CCPL=1 completes the status stage -> CTRT idle event.
+            // DCPCTR: CCPL=1 queues the status-stage ZLP. Like HW, its
+            // completion surfaces as BEMP on pipe 0 (not CTRT): the stack
+            // finishes status in process_pipe0_bemp -> XFER_COMPLETE.
+            // CCPL is a strobe: HW accepts it and clears it, so EVERY
+            // write with CCPL set must latch a fresh BEMP (a retained-bit
+            // edge check fires only once and wedges all later status
+            // stages with EP0-IN busy stuck).
             0x60 => {
-                let old = self.regs.get(&0x60).copied().unwrap_or(0);
-                self.regs.insert(0x60, w);
-                if w & (1 << 2) != 0 && old & (1 << 2) == 0 {
-                    self.ctrt = true;
-                    self.ctsq = 0;
+                self.regs.insert(0x60, w & !(1 << 2));
+                if w & (1 << 2) != 0 {
+                    self.bemp |= 1;
                     self.raise_usb_int(sys);
                 }
             }

@@ -320,6 +320,14 @@ impl Cpu {
     fn select_pending(&self, sys: &WasmSystem) -> Option<i32> {
         let exec_prio = self.execution_priority(sys);
         let bits = sys.p.nvic.borrow().pending_bits();
+        if std::env::var("SELLOG").is_ok() && bits != 0 {
+            static SEL_N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if SEL_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+                eprintln!("SELLOG bits={:x} exec={} depth={} pm={} fm={} bp={} ipsr={}",
+                    bits, exec_prio, self.exc_stack.len(), self.regs.primask, self.regs.faultmask,
+                    self.regs.basepri, self.ipsr);
+            }
+        }
         let mut best: Option<(i32, u32, i32)> = None; // (group, sub, irq)
         let mut b = bits;
         while b != 0 {
@@ -352,7 +360,14 @@ impl Cpu {
                 best = Some((group, sub, irq));
             }
         }
-        best.map(|(_, _, irq)| irq)
+        let verdict = best.map(|(_, _, irq)| irq);
+        if std::env::var("SELLOG").is_ok() && bits != 0 {
+            static SEL_M: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if SEL_M.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 6 {
+                eprintln!("SELLOG verdict={:?}", verdict);
+            }
+        }
+        verdict
     }
 
     /// Raise a synchronous exception (SVC insn, MPU fault, UsageFault):
@@ -401,6 +416,10 @@ impl Cpu {
     /// (negative irq) and external IRQs, thread or nested (an IRQ taken in
     /// handler mode runs on MSP and returns via F1 to the outer handler).
     pub fn take_exception(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32) {
+        if std::env::var("EXCLOG").is_ok() {
+            eprintln!("EXCLOG take irq={} pc={:08x} cnt={}", irq, self.regs.r[15] & !1,
+                crate::system::INSTRUCTION_COUNT.load(std::sync::atomic::Ordering::Relaxed));
+        }
         let vector = (16 + irq) as u32;
         // Bank the thread stack, then run the handler on MSP. The frame
         // goes onto the CURRENT stack (PSP if thread+PSP, else MSP) — this

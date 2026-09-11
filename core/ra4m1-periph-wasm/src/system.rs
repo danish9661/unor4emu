@@ -198,6 +198,14 @@ pub fn icu_set_ielsr(irq: usize, event: u32) {
 }
 
 pub fn icu_raise_event(sys: &WasmSystem, event: u32) {
+    if std::env::var("EVLOG").is_ok() && event == 51 {
+        static EV_N: AtomicU64 = AtomicU64::new(0);
+        let n = EV_N.fetch_add(1, Ordering::Relaxed);
+        if n < 40 {
+            eprintln!("EVLOG ev={} cnt={} pend={:x}", event, instruction_count(),
+                sys.p.nvic.borrow().pending_bits() as u64);
+        }
+    }
     if event == 0 {
         return;
     }
