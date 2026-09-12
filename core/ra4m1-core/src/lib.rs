@@ -194,6 +194,20 @@ pub fn usb_host_status_done() {
     crate::system::icu_raise_event(sys(), 51);
 }
 
+/// Virtual-host: 3ms bus idle (DVSQ -> SUSPx, TinyUSB suspend path).
+#[wasm_bindgen]
+pub fn usb_host_suspend() {
+    with_usb(|u| u.host_suspend(sys()));
+    crate::system::icu_raise_event(sys(), 51);
+}
+
+/// Virtual-host: bus activity again (RESM latches, DVSQ restored).
+#[wasm_bindgen]
+pub fn usb_host_resume() {
+    with_usb(|u| u.host_resume(sys()));
+    crate::system::icu_raise_event(sys(), 51);
+}
+
 /// Virtual-host: queue received bytes on a pipe (Serial.read path).
 #[wasm_bindgen]
 pub fn usb_rx_inject(pipe: u8, data: &[u8]) {

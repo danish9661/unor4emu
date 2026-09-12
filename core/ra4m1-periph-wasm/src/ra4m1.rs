@@ -1204,7 +1204,7 @@ mod tests {
         sys: &crate::system::WasmSystem,
         mem: &mut crate::cpu::mem::FlatMemory,
         cpu: &mut Cpu,
-    ) {
+    ) -> Vec<u8> {
         let dev = usb_ctl_in(sys, mem, cpu, 0x0680, 0x0100, 0, 18, 18);
         assert_eq!((dev[0], dev[1]), (18, 1), "DEVICE descriptor");
         ctl_out(sys, mem, cpu, 0x0500, 5, 0, &[]);
@@ -1219,6 +1219,7 @@ mod tests {
         ctl_out(sys, mem, cpu, 0x2021, 0, 0,
             &[0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08]);
         ctl_out(sys, mem, cpu, 0x2221, 3, 0, &[]);
+        cfg
     }
 
     /// One control-OUT transfer. The OUT data stage is fed AFTER the setup
@@ -1314,6 +1315,187 @@ mod tests {
     fn usb_pipe_cfg(sys: &crate::system::WasmSystem, pipe: u32) -> u16 {
         sys.p.write(sys, USBFS_BASE + 0x64, 2, pipe);
         sys.p.read(sys, USBFS_BASE + 0x68, 2) as u16
+    }
+
+    #[test]
+    fn ra4m1_map_usb_suspend_resume() {
+        // USBFS suspend/resume (TinyUSB dcd_rusb2 surface): the virtual
+        // host idles the bus (DVSQ -> SUSPx from the live state + IRQ),
+        // then resumes (RESM latches + IRQ, DVSQ restored, write-0
+        // clears). DVSTCTR0.WKUP retains for remote-wakeup firmware.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 9 * 4, 4, 51); // IELSR9 = USBFS_INT
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 9);     // ISER0: IRQ9
+        sys.p.write(sys, USBFS_BASE + 0x30, 2, (1 << 11) | (1 << 12) | (1 << 14)); // CTRT+DVST+RESM
+        with_usb(sys, |u| u.host_set_dvst(3)); // CNFG
+        crate::system::icu_raise_event(sys, 51);
+        with_usb(sys, |u| u.host_suspend(sys));
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x40, 2) & 0x70, 0x70, "DVSQ=SUSP3");
+        assert!(sys.p.nvic.borrow().has_pending(), "suspend IRQ");
+        with_usb(sys, |u| u.host_resume(sys));
+        assert_ne!(sys.p.read(sys, USBFS_BASE + 0x40, 2) & (1 << 14), 0, "RESM");
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x40, 2) & 0x70, 0x30, "DVSQ=CNFG");
+        assert!(sys.p.nvic.borrow().has_pending(), "resume IRQ");
+        // Write-0 clears RESM (the dcd ISR shape); WKUP retains.
+        sys.p.write(sys, USBFS_BASE + 0x40, 2, !0x4000 & 0xFFFF);
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x40, 2) & (1 << 14), 0, "RESM clear");
+        sys.p.write(sys, USBFS_BASE + 0x08, 2, 1 << 7); // DVSTCTR0.WKUP
+        assert_ne!(sys.p.read(sys, USBFS_BASE + 0x08, 2) & (1 << 7), 0, "WKUP");
+    }
+
+    #[test]
+    fn ra4m1_usb_hid_keyboard() {
+        // Native HID keyboard through real TinyUSB: the sketch appends a
+        // boot-keyboard report descriptor (PluggableUSB picks up a HID
+        // interface + INT-IN endpoint), the host enumerates CDC+HID, reads
+        // the report descriptor, sends SET_IDLE, then the sketch's 'a'
+        // report lands in TX capture and the LED lights.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4hid.bin");
+        let mut mem = ra4m1_memory();
+        let mut img = vec![0xFFu8; APP_BASE as usize];
+        img.extend_from_slice(bin);
+        mem.load(&img, FLASH_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        let cfg = usb_enumerate_cdc(sys, &mut mem, &mut cpu);
+        // Find the HID interface in the full configuration descriptor.
+        let mut hid_iface = None;
+        let mut i = 0;
+        while i + 2 < cfg.len() {
+            let len = cfg[i] as usize;
+            if len == 0 { break; }
+            if i + len <= cfg.len() && cfg[i + 1] == 4 && cfg[i + 5] == 3 {
+                hid_iface = Some(cfg[i + 2]);
+            }
+            i += len;
+        }
+        let iface = hid_iface.expect("HID interface in config");
+        // GET_DESCRIPTOR (report) + SET_IDLE, like a real host.
+        // The sketch reports as soon as it sees mount (mid-enumeration),
+        // so drain before the descriptor read to see only the descriptor.
+        let _ = usb_take_tx(sys);
+        let rep = usb_ctl_in(sys, &mut mem, &mut cpu, 0x0681, 0x2200, iface as u16, 255, 63);
+        assert_eq!((rep[0], rep[1]), (0x05, 0x01), "report descriptor");
+        ctl_out(sys, &mut mem, &mut cpu, 0x0A21, 0, iface as u16, &[]);
+        // Discover the HID interrupt-IN pipe (TYPE==int, EPNUM==3, DIR=IN).
+        let mut int_pipe = None;
+        for n in 1..10u32 {
+            let c = usb_pipe_cfg(sys, n);
+            if (c >> 14) & 3 == 2 && c & 0xF == 3 && c & (1 << 4) != 0 {
+                int_pipe = Some(n as usize);
+            }
+        }
+        assert!(int_pipe.is_some(), "HID INT-IN pipe");
+        // The sketch re-sends every 500ms; the 8-byte 'a' report arrives.
+        let _ = usb_take_tx(sys);
+        let mut got = Vec::new();
+        let mut toggled = false;
+        for _ in 0..2000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            got.extend(usb_take_tx(sys));
+            if got.windows(8).any(|w| w == [0, 0, 0x04, 0, 0, 0, 0, 0]) {
+                toggled = snap() != first;
+                break;
+            }
+        }
+        assert!(got.windows(8).any(|w| w == [0, 0, 0x04, 0, 0, 0, 0, 0]), "HID report, got {}B", got.len());
+        assert!(toggled, "LED never lit after HID report");
+    }
+
+    #[test]
+    fn ra4m1_usb_suspend_resume_ok() {
+        // End-to-end USB suspend/resume on real TinyUSB: the sketch
+        // overrides the weak suspend/resume callbacks to drive the LED;
+        // the virtual host idles the bus (suspend -> LED on) then
+        // resumes (LED off). Enumerated CDC keeps the stack running.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4susp.bin");
+        let mut mem = ra4m1_memory();
+        let mut img = vec![0xFFu8; APP_BASE as usize];
+        img.extend_from_slice(bin);
+        mem.load(&img, FLASH_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        usb_enumerate_cdc(sys, &mut mem, &mut cpu);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        with_usb(sys, |u| u.host_suspend(sys));
+        let mut on = false;
+        for _ in 0..600 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                on = true;
+                break;
+            }
+        }
+        assert!(on, "LED never lit on suspend");
+        let lit = snap();
+        with_usb(sys, |u| u.host_resume(sys));
+        let mut off = false;
+        for _ in 0..600 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != lit {
+                off = true;
+                break;
+            }
+        }
+        assert!(off, "LED never cleared on resume");
     }
 
     #[test]

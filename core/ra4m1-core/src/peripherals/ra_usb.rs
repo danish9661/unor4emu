@@ -39,6 +39,10 @@ pub struct RaUsb {
     ctsq: u8,
     vbint: bool,
     vbsts: bool,
+    /// Resume detected (INTSTS0.RESM, bit14, write-0 clears).
+    resm: bool,
+    /// DVSQ before suspend (restored on resume).
+    prev_dvsq: u8,
     // Windowed pipe config (PIPESEL selects pipe for +0x68/+0x6C).
     pipesel: u16,
     pipecfg: [u16; 10],
@@ -60,6 +64,8 @@ impl RaUsb {
             ctsq: 0,
             vbint: false,
             vbsts: false,
+            resm: false,
+            prev_dvsq: 0,
             pipesel: 0,
             pipecfg: [0; 10],
             pipemaxp: [64; 10],
@@ -106,6 +112,26 @@ impl RaUsb {
     pub fn host_attach(&mut self) {
         self.vbint = true;
         self.vbsts = true;
+    }
+
+    /// Virtual-host: 3ms bus idle (DVSQ -> SUSPx, TinyUSB suspend path).
+    /// The suspend sub-state follows the pre-suspend state like HW
+    /// (powered->SUSP0, DEF->SUSP1, ADDR->SUSP2, CNFG->SUSP3).
+    pub fn host_suspend(&mut self, sys: &System) {
+        self.prev_dvsq = self.dvsq;
+        self.dvsq = 4 | (self.dvsq & 3);
+        self.dvst = true;
+        self.raise_usb_int(sys);
+    }
+
+    /// Virtual-host: bus activity again (RESM latches, DVSQ restored;
+    /// TinyUSB resume path). Remote-wakeup signaling itself (DVSTCTR0.WKUP)
+    /// is firmware-driven and retains like any register.
+    pub fn host_resume(&mut self, sys: &System) {
+        self.resm = true;
+        self.dvsq = self.prev_dvsq;
+        self.dvst = true;
+        self.raise_usb_int(sys);
     }
 
     fn sel(&self, sel_reg: u32) -> usize {
@@ -170,7 +196,8 @@ impl RaUsb {
         // CTRT/DVST/VBINT share the same vector; fire when latched+enabled.
         let dvse = enb & (1 << 12) != 0;
         let ctre = enb & (1 << 11) != 0;
-        if (ctre && self.ctrt) || (dvse && self.dvst) || self.vbint {
+        let resme = enb & (1 << 14) != 0;
+        if (ctre && self.ctrt) || (dvse && self.dvst) || self.vbint || (resme && self.resm) {
             crate::system::icu_raise_event(sys, USBFS_INT_EVENT);
         }
     }
@@ -195,6 +222,9 @@ impl RaUsb {
         if self.dvst {
             v |= 1 << 12;
         }
+        if self.resm {
+            v |= 1 << 14; // RESM
+        }
         if self.vbint {
             v |= 1 << 15;
         }
@@ -208,6 +238,9 @@ impl RaUsb {
         }
         if w & (1 << 12) == 0 {
             self.dvst = false;
+        }
+        if w & (1 << 14) == 0 {
+            self.resm = false;
         }
         if w & (1 << 15) == 0 {
             self.vbint = false;
