@@ -15,13 +15,16 @@ use super::Peripheral;
 //   CTSUERRS+0x1C (RO, error status), CTSUTRMR+0x20.
 // Model: accept-and-retain all config; a 0->1 STRT edge with PON set
 // starts a measurement that completes on the next tick (like the ADC,
-// conversion is instant on the virtual clock): SC fills from the JS
-// override table (`ctsu_set_override`, else a deterministic per-channel
-// default), RC fills a fixed reference, overflow sets SOVF for raw
-// counts > 16 bits, and CTSU_END (event 68) raises. WRITE (66) / READ
-// (67) are DTC transfer requests - unmodeled (polling works). STRT is
-// retained (firmware clears it, like HW waiting for software); INIT
-// resets the block (running + flags + counters).
+// conversion is instant on the virtual clock). Self mode
+// (CTSUCR1.MD=0/1): SC fills from the JS override table
+// (`ctsu_set_override`, else a deterministic per-channel default), RC
+// fills a fixed reference. Mutual mode (MD=2): the pair is RX=CTSUMCH0
+// + TX=CTSUMCH1, overrides keyed 0x8000|(rx<<8)|tx, else a distinct
+// deterministic pair default. Overflow sets SOVF for raw counts >
+// 16 bits, and CTSU_END (event 68) raises. WRITE (66) / READ (67) are
+// DTC transfer requests - unmodeled (polling works). STRT is retained
+// (firmware clears it, like HW waiting for software); INIT resets the
+// block (running + flags + counters).
 pub const CTSU_BASE: u32 = 0x4008_1000;
 // ELC events (bsp_elc.h).
 pub const CTSU_END_EVENT: u32 = 68;
@@ -38,11 +41,18 @@ impl RaCtsu {
         Some(Box::new(Self { cfg: [0; 0x24], sc: 0, rc: 0, running: false }))
     }
     fn pon(&self) -> bool { self.cfg[0x01] & 1 != 0 }
+    fn mutual(&self) -> bool { (self.cfg[0x01] >> 6) & 3 == 2 }
     fn channel(&self) -> u32 { (self.cfg[0x04] & 0x3F) as u32 }
     fn complete(&mut self, sys: &System) {
-        let ch = self.channel();
-        let raw = crate::system::ctsu_get_override(ch)
-            .unwrap_or(0x0800 + ch * 0x41);
+        let raw = if self.mutual() {
+            let rx = (self.cfg[0x04] & 0x3F) as u32;
+            let tx = (self.cfg[0x05] & 0x3F) as u32;
+            crate::system::ctsu_get_override(0x8000 | (rx << 8) | tx)
+                .unwrap_or(0x1000 + rx * 0x37 + tx * 0x11)
+        } else {
+            let ch = self.channel();
+            crate::system::ctsu_get_override(ch).unwrap_or(0x0800 + ch * 0x41)
+        };
         if raw > 0xFFFF {
             self.sc = 0xFFFF;
             self.cfg[0x11] |= 1 << 5; // SOVF

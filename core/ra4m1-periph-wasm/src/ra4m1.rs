@@ -498,6 +498,77 @@ mod tests {
     }
 
     #[test]
+    fn ra4m1_map_ctsu_mutual() {
+        // CTSU mutual-capacitance (MD=2): RX=CTSUMCH0 + TX=CTSUMCH1 pair
+        // measures on STRT->tick with its own deterministic default,
+        // reference counter, and END event - independent of self mode.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 11 * 4, 4, 68); // IELSR11 = CTSU_END
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 11);     // ISER0: IRQ11
+        sys.p.write(sys, CTSU_BASE + 0x01, 1, 0x81);   // PON + MD=10 mutual
+        sys.p.write(sys, CTSU_BASE + 0x04, 1, 5);      // RX ch5
+        sys.p.write(sys, CTSU_BASE + 0x05, 1, 3);      // TX ch3
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x01);   // STRT
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x18, 2) & 0xFFFF, 0x1000 + 5 * 0x37 + 3 * 0x11, "SC pair");
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x1A, 2) & 0xFFFF, 0x3C00, "RC");
+        assert!(sys.p.nvic.borrow().has_pending(), "END event pending");
+        // Pair override steers the count (touch = different capacitance).
+        crate::system::ctsu_set_override(0x8000 | (5 << 8) | 3, 0x0ABC);
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x00);   // STRT clear
+        sys.p.write(sys, CTSU_BASE + 0x00, 1, 0x01);   // STRT again
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CTSU_BASE + 0x18, 2) & 0xFFFF, 0x0ABC, "override");
+        crate::system::ctsu_clear_override(0x8000 | (5 << 8) | 3);
+    }
+
+    #[test]
+    fn ra4m1_ctsu_mutual_ok() {
+        // End-to-end CTSU mutual mode on real firmware: a bare-metal
+        // sketch (no Arduino touch API) configures MD=2 with RX ch5 /
+        // TX ch3, triggers, and lights the LED once millis() passes and
+        // the pair counter reads back the deterministic default.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4ctsu.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "LED never lit: CTSU mutual round-trip failed");
+    }
+
+    #[test]
     fn ra4m1_map_can_loopback() {
         // CAN0 self-test (internal loopback): reset -> halt -> operation
         // with STR tracking each mode, TX MB0 (SID 0x123, 8 bytes) into
