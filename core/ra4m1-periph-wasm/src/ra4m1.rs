@@ -772,6 +772,109 @@ mod tests {
     }
 
     #[test]
+    fn ra4m1_map_can_fifo() {
+        // CAN0 FIFO mode in self-test loopback: RX FIFO queues frames
+        // (RFUST, MB24 head, RFPCR pop, RFMLF on overfill, FIFO_RX event),
+        // TX FIFO stages through the MB24 write port (TFPCR latch, TFUST,
+        // one ship per tick, FIFO_TX event).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 14 * 4, 4, 75); // IELSR14 = FIFO_RX
+        sys.p.write(sys, 0x4000_6300 + 15 * 4, 4, 76); // IELSR15 = FIFO_TX
+        sys.p.write(sys, 0xE000_E100, 4, (1 << 14) | (1 << 15)); // ISER0
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0100); // CANM = reset
+        sys.p.write(sys, CAN0_BASE + 0x844, 4, 0x0018_0009); // BCR retain
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0200); // CANM = halt
+        sys.p.write(sys, CAN0_BASE + 0x858, 1, 0x07); // TCR: self-test loopback
+        sys.p.write(sys, CAN0_BASE + 0x848, 1, 0x01); // RFCR.RFE
+        sys.p.write(sys, CAN0_BASE + 0x84A, 1, 0x01); // TFCR.TFE
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0000); // CANM = operation
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x848, 1) & 0x80, 0x80, "RFEST empty");
+        // Mailbox TX lands in the RX FIFO (FIDCR zero = match-all).
+        sys.p.write(sys, CAN0_BASE + 0x200, 4, 0x123 << 18); // MB0 SID
+        sys.p.write(sys, CAN0_BASE + 0x204, 2, 8); // DLC
+        for i in 0..8u32 {
+            sys.p.write(sys, CAN0_BASE + 0x206 + i, 1, 0xA0 + i);
+        }
+        sys.p.write(sys, CAN0_BASE + 0x820 + 0, 1, 0x80); // MB0 TRMREQ
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x848, 1) & 0x0E, 0x02, "RFUST=1");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x380, 4) & 0xFFFF_FFFF, 0x123 << 18, "MB24 head ID");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x386, 1) & 0xFF, 0xA0, "MB24 head data");
+        assert!(sys.p.nvic.borrow().has_pending(), "FIFO_RX pending");
+        // Pop advances; overfill sticks RFMLF (W0C clear).
+        sys.p.write(sys, CAN0_BASE + 0x849, 1, 0xFF); // RFPCR pop
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x848, 1) & 0x80, 0x80, "empty again");
+        for _ in 0..5 {
+            sys.p.write(sys, CAN0_BASE + 0x820 + 0, 1, 0x80); // TRMREQ
+            sys.tick(); // delivers to FIFO
+            sys.p.write(sys, CAN0_BASE + 0x820 + 0, 1, 0x00); // clear SENTDATA
+        }
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x848, 1) & (1 << 4), 0, "RFMLF");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x848, 1) & 0x0E, 0x08, "RFUST=4");
+        sys.p.write(sys, CAN0_BASE + 0x848, 1, 0x01); // W0C RFMLF (RFE stays)
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x848, 1) & (1 << 4), 0, "RFMLF clear");
+        for _ in 0..4 {
+            sys.p.write(sys, CAN0_BASE + 0x849, 1, 0xFF);
+        }
+        // TX FIFO: stage MB24, latch, ships one per tick into RX FIFO.
+        sys.p.write(sys, CAN0_BASE + 0x380, 4, 0x321 << 18); // stage SID
+        sys.p.write(sys, CAN0_BASE + 0x384, 2, 1); // DLC
+        sys.p.write(sys, CAN0_BASE + 0x386, 1, 0xDB);
+        sys.p.write(sys, CAN0_BASE + 0x84B, 1, 0xFF); // TFPCR latch
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84A, 1) & 0x0E, 0x02, "TFUST=1");
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84A, 1) & 0x0E, 0x00, "shipped");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x380, 4) & 0xFFFF_FFFF, 0x321 << 18, "RX FIFO got it");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x386, 1) & 0xFF, 0xDB, "payload");
+    }
+
+    #[test]
+    fn ra4m1_can_fifo_ok() {
+        // End-to-end CAN FIFO on real firmware: a bare-metal sketch
+        // (Arduino_CAN has no FIFO API) drives self-test loopback with
+        // RX FIFO enabled, TXes one frame via mailbox 0, and lights the
+        // LED once millis() passes and MB24 shows the frame back.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4canfifo.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "LED never lit: CAN FIFO round-trip failed");
+    }
+
+    #[test]
     fn ra4m1_map_sci_spi_loopback() {        // SCI1 in simple-SPI master mode (SMR.CM + SPMR.SSE/MSS, the
         // Arduino r_sci_spi shape): TDR shifts out while MISO samples
         // in the same clocks. Loopback jig echoes; open bus reads 0xFF;
