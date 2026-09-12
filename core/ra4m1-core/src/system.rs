@@ -255,6 +255,37 @@ pub fn spi_slave_shift(sys: &WasmSystem, from_ch: usize, mosi: u8) -> Option<u8>
     None
 }
 
+// ── Virtual SD card (SPI mode) behind a per-channel arming flag ───────────
+// Same jig pattern as the loopback/EEPROM: when armed, the channel's
+// master MOSI stream feeds the SD engine (CMD0/8/55/41/58/17/24) and
+// MISO comes from it. CS is not modeled (always selected).
+static SD_ARMED: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+static SD_CARD: OnceLock<Mutex<crate::peripherals::ra_spi::SpiSd>> = OnceLock::new();
+
+fn sd_armed_set() -> &'static Mutex<std::collections::HashSet<u32>> {
+    SD_ARMED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+fn sd_card() -> &'static Mutex<crate::peripherals::ra_spi::SpiSd> {
+    SD_CARD.get_or_init(|| Mutex::new(crate::peripherals::ra_spi::SpiSd::new()))
+}
+pub fn spi_set_sd_card(base: u32, on: bool) {
+    let mut m = sd_armed_set().lock().unwrap();
+    if on {
+        m.insert(base);
+    } else {
+        m.remove(&base);
+    }
+}
+/// MISO byte for a master MOSI byte (None = no card armed here, caller
+/// falls through to slave/jig/0xFF).
+pub fn spi_sd_exchange(base: u32, mosi: u8) -> Option<u8> {
+    if sd_armed_set().lock().unwrap().contains(&base) {
+        Some(sd_card().lock().unwrap().exchange(mosi))
+    } else {
+        None
+    }
+}
+
 // ── Dataflash backing (8KB @ 0x40100000, erased 0xFF) ───────────────────────
 // Shared by the dataflash memory window and the FACI program/erase engine.
 pub const DATAFLASH_SIZE: usize = 8192;
@@ -434,6 +465,8 @@ pub fn reset_globals() {
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CTSU_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SCI_SPI_LOOPBACK.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = SD_ARMED.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = SD_CARD.get() { *m.lock().unwrap() = crate::peripherals::ra_spi::SpiSd::new(); }
     *dataflash().lock().unwrap() = [0xFF; 8192];
     icu_reset_mirror();
     for i in 0..8 {

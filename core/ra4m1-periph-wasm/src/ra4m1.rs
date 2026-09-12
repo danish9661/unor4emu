@@ -946,6 +946,160 @@ mod tests {
     }
 
     #[test]
+    fn ra4m1_map_sd_card() {
+        // Virtual SD card in SPI mode behind the arming flag: clocks,
+        // CMD0/CMD8 init, CMD55+ACMD41 ready loop, CMD58 OCR, CMD17
+        // block read (MBR signature), CMD24 write + read-back. The CPU
+        // side is plain master SPDR transfers (instant, no ticks).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        crate::system::spi_set_sd_card(SPI1_BASE, true);
+        sys.p.write(sys, SPI1_BASE + 0x00, 1, 0x48); // master: MSTR + SPE
+        let xfer = |sys: &crate::system::WasmSystem, b: u32| -> u8 {
+            sys.p.write(sys, SPI1_BASE + 0x04, 1, b);
+            (sys.p.read(sys, SPI1_BASE + 0x04, 1) & 0xFF) as u8
+        };
+        let cmd = |sys: &crate::system::WasmSystem, n: u8, arg: u32, crc: u8| {
+            xfer(sys, (0x40 | n) as u32);
+            for k in 0..4 {
+                xfer(sys, ((arg >> (24 - 8 * k)) & 0xFF) as u32);
+            }
+            xfer(sys, crc as u32);
+        };
+        let r1 = |sys: &crate::system::WasmSystem| -> u8 {
+            for _ in 0..8 {
+                let r = xfer(sys, 0xFF);
+                if r != 0xFF {
+                    return r;
+                }
+            }
+            0xFF
+        };
+        for _ in 0..10 {
+            xfer(sys, 0xFF); // 80 init clocks
+        }
+        cmd(sys, 0, 0, 0x95);
+        assert_eq!(r1(sys), 0x01, "CMD0 idle");
+        cmd(sys, 8, 0x1AA, 0x87);
+        assert_eq!(r1(sys), 0x01, "CMD8");
+        assert_eq!((xfer(sys, 0xFF), xfer(sys, 0xFF), xfer(sys, 0xFF), xfer(sys, 0xFF)), (0, 0, 1, 0xAA), "R7");
+        let mut ready = false;
+        for _ in 0..4 {
+            cmd(sys, 55, 0, 0x01);
+            let _ = r1(sys);
+            cmd(sys, 41, 0x4000_0000, 0x01);
+            if r1(sys) == 0x00 {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "ACMD41 ready");
+        cmd(sys, 58, 0, 0x01);
+        assert_eq!(r1(sys), 0x00, "CMD58");
+        assert_eq!((xfer(sys, 0xFF), xfer(sys, 0xFF), xfer(sys, 0xFF), xfer(sys, 0xFF)), (0xC0, 0xFF, 0x80, 0x00), "OCR");
+        // CMD17 block 0: token, 512 bytes, MBR signature at the end.
+        cmd(sys, 17, 0, 0x01);
+        let mut tok = 0xFF;
+        for _ in 0..16 {
+            tok = xfer(sys, 0xFF);
+            if tok == 0xFE {
+                break;
+            }
+        }
+        assert_eq!(tok, 0xFE, "data token");
+        let mut blk = vec![0u8; 512];
+        for b in blk.iter_mut() {
+            *b = xfer(sys, 0xFF);
+        }
+        xfer(sys, 0xFF);
+        xfer(sys, 0xFF); // CRC16
+        assert_eq!((blk[510], blk[511]), (0x55, 0xAA), "MBR signature");
+        // CMD24 block 1 + read-back round trip.
+        cmd(sys, 24, 1, 0x01);
+        assert_eq!(r1(sys), 0x00, "CMD24");
+        xfer(sys, 0xFE);
+        for i in 0..512u32 {
+            xfer(sys, (i.wrapping_mul(11).wrapping_add(5)) as u32 & 0xFF);
+        }
+        xfer(sys, 0xFF);
+        xfer(sys, 0xFF);
+        let mut resp = 0xFF;
+        for _ in 0..8 {
+            resp = xfer(sys, 0xFF);
+            if resp != 0xFF {
+                break;
+            }
+        }
+        assert_eq!(resp & 0x1F, 0x05, "data accepted");
+        for _ in 0..8 {
+            if xfer(sys, 0xFF) == 0xFF {
+                break;
+            }
+        }
+        cmd(sys, 17, 1, 0x01);
+        let mut tok = 0xFF;
+        for _ in 0..16 {
+            tok = xfer(sys, 0xFF);
+            if tok == 0xFE {
+                break;
+            }
+        }
+        assert_eq!(tok, 0xFE, "token2");
+        for i in 0..512u32 {
+            assert_eq!(xfer(sys, 0xFF), (i.wrapping_mul(11).wrapping_add(5)) as u8 & 0xFF, "byte {}", i);
+        }
+        crate::system::spi_set_sd_card(SPI1_BASE, false);
+    }
+
+    #[test]
+    fn ra4m1_sd_ok() {
+        // End-to-end virtual SD card on real firmware: the sketch drives
+        // Arduino SPI (D11-13, SPI1) through the SD init sequence
+        // (CMD0/CMD8/ACMD41), reads block 0 (MBR signature), writes a
+        // pattern to block 1 and reads it back; the LED lights once
+        // millis() passes and every stage matches. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4sd.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        crate::system::spi_set_sd_card(SPI1_BASE, true);
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        crate::system::spi_set_sd_card(SPI1_BASE, false);
+        assert!(toggled, "LED never lit: SD round-trip failed");
+    }
+
+    #[test]
     fn ra4m1_map_sci_spi_loopback() {        // SCI1 in simple-SPI master mode (SMR.CM + SPMR.SSE/MSS, the
         // Arduino r_sci_spi shape): TDR shifts out while MISO samples
         // in the same clocks. Loopback jig echoes; open bus reads 0xFF;
