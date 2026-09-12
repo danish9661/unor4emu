@@ -126,6 +126,13 @@ pub fn spi_set_loopback(addr: u32, on: bool) {
     system::sci_set_spi_loopback(addr, on);
 }
 
+/// Inject an external-pin edge on ICU IRQ line (virtual button press
+/// for `attachInterrupt` sketches). Returns whether the line fired.
+#[wasm_bindgen]
+pub fn icu_pin_edge(line: u8, falling: bool) -> bool {
+    system::icu_pin_edge(sys(), line as usize, falling)
+}
+
 #[wasm_bindgen]
 pub fn is_watchdog_reset_requested() -> bool {
     system::is_watchdog_reset_requested()

@@ -622,14 +622,14 @@ impl Peripherals {
         // RA PORT + PFS (+PMISC tail)
         if let Some(x) = ra_port::RaPort::new_port() { add(0x4004_0000, 0x4004_0200, x); }
         if let Some(x) = ra_port::RaPort::new_pfs() { add(0x4004_0800, 0x4004_0E00, x); }
-        // RA SCI0,1,2,9 (BSP_FEATURE_SCI_CHANNELS=0x207, stride 0x20)
-        for hw in [0u8, 1, 2, 9] {
+        // RA SCI0-9 (stride 0x20; 3-8 have no ELC events: polled only)
+        for hw in 0..10u8 {
             if let Some(x) = ra_sci::RaSci::new(hw) {
                 add(0x4007_0000 + (hw as u32) * 0x20, 0x4007_0000 + (hw as u32) * 0x20 + 0x20, x);
             }
         }
-        // RA GPT0-7: 2x32-bit + 6x16-bit (stride 0x100)
-        for ch in 0..8u8 {
+        // RA GPT0-13: 2x32-bit + 12x16-bit (stride 0x100; 8-13 eventless)
+        for ch in 0..14u8 {
             if let Some(x) = ra_gpt::RaGpt::new(ch) {
                 let base = 0x4007_8000 + (ch as u32) * 0x100;
                 add(base, base + 0x100, x);
@@ -643,11 +643,16 @@ impl Peripherals {
         if let Some(x) = ra_analog::RaDac::new() { add(0x4005_E000, 0x4005_E100, x); }
         if let Some(x) = ra_rtc::RaRtc::new() { add(0x4004_4000, 0x4004_4200, x); }
         // RA DMAC + DTC + ELC + AGT0-1 + WDT/IWDT + CRC + DOC
-        if let Some(x) = ra_dma::RaDmac::new_dmac() { add(0x4000_5000, 0x4000_5100, x); }
+        if let Some(x) = ra_dma::RaDmac::new_dmac() { add(0x4000_5000, 0x4000_5200, x); }
         if let Some(x) = ra_dma::RaDmac::new_dtc() { add(0x4000_5400, 0x4000_5500, x); }
         if let Some(x) = ra_misc::RaElc::new() { add(0x4004_1000, 0x4004_1300, x); }
-        if let Some(x) = ra_misc::RaAgt::new_ch(0) { add(0x4008_4000, 0x4008_4100, x); }
-        if let Some(x) = ra_misc::RaAgt::new_ch(1) { add(0x4008_4100, 0x4008_4200, x); }
+        // RA AGT0-5 (stride 0x100; 2-5 have no ELC events: polled only)
+        for ch in 0..6u8 {
+            if let Some(x) = ra_misc::RaAgt::new_ch(ch) {
+                let base = 0x4008_4000 + (ch as u32) * 0x100;
+                add(base, base + 0x100, x);
+            }
+        }
         if let Some(x) = ra_misc::RaWdt::new() { add(0x4004_4200, 0x4004_4300, x); }
         if let Some(x) = ra_misc::RaWdt::new() { add(0x4004_4400, 0x4004_4500, x); }
         if let Some(x) = ra_misc::RaCrc::new() { add(0x4007_4000, 0x4007_4100, x); }
@@ -661,9 +666,10 @@ impl Peripherals {
         if let Some(x) = ra_ctsu::RaCtsu::new() { add(0x4008_1000, 0x4008_1100, x); }
         // RA CAN0 (mailbox CAN; CAN1 has no routable mailbox events here)
         if let Some(x) = ra_can::RaCan::new_can0() { add(0x4005_0000, 0x4005_1000, x); }
-        // RA IIC0/IIC1 (RIIC master + virtual EEPROM slave at 0x50)
+        // RA IIC0-2 (RIIC master + virtual EEPROM slave at 0x50; IIC2 eventless)
         if let Some(x) = ra_i2c::RaIic::new_ch(0) { add(0x4005_3000, 0x4005_3100, x); }
         if let Some(x) = ra_i2c::RaIic::new_ch(1) { add(0x4005_3100, 0x4005_3200, x); }
+        if let Some(x) = ra_i2c::RaIic::new_ch(2) { add(0x4005_3200, 0x4005_3300, x); }
         // RA SPI0/SPI1 (RSPI; Arduino SPI is polled, loopback jig shared)
         if let Some(x) = ra_spi::RaSpi::new_spi(0) { add(0x4007_2000, 0x4007_2100, x); }
         if let Some(x) = ra_spi::RaSpi::new_spi(1) { add(0x4007_2100, 0x4007_2200, x); }

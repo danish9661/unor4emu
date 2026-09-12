@@ -5,6 +5,10 @@ use super::Peripheral;
 // NMIER +0x120, WUPEN +0x1A0, IELEN +0x1C0, SELSR0 +0x200,
 // DELSR[8] +0x280, IELSR[96] +0x300. The IELSR table is mirrored to the
 // shared routing table so peripheral events pend the firmware-mapped IRQ.
+// External pin interrupts are ELC events 1-16 (ICU_IRQ0-15): the
+// test/JS side injects an edge per line via pin_edge (virtual button),
+// gated on IRQCR.IRQMD like HW (00 falling, 01 rising, 10 either;
+// 11 low-level is latched, not edged - unsupported, documented).
 pub const ICU_BASE: u32 = 0x4000_6000;
 
 pub struct RaIcu {
@@ -14,6 +18,24 @@ pub struct RaIcu {
 impl RaIcu {
     pub fn new() -> Option<Box<dyn Peripheral>> {
         Some(Box::new(Self { regs: Default::default() }))
+    }
+    fn irqcr(&self, line: usize) -> u8 {
+        // IRQCR[line] is byte `line` of the word at aligned base.
+        let w = self.regs.get(&((line / 4 * 4) as u32)).copied().unwrap_or(0);
+        ((w >> (8 * (line % 4))) & 0xFF) as u8
+    }
+    /// Inject a pin edge on external IRQ `line` (0-15). Fires ELC event
+    /// 1+line when IRQCR.IRQMD matches the edge direction.
+    pub fn pin_edge(&mut self, sys: &System, line: usize, falling: bool) -> bool {
+        if line >= 16 {
+            return false;
+        }
+        let md = self.irqcr(line) & 3;
+        let hit = if falling { md == 0 || md == 2 } else { md == 1 || md == 2 };
+        if hit {
+            crate::system::icu_raise_event(sys, 1 + line as u32);
+        }
+        hit
     }
 }
 

@@ -22,13 +22,14 @@ pub fn sci_rx_inject(sys: &crate::system::System, base: u32, b: u8) -> bool {
 }
 
 fn sci_events(hw_ch: u8) -> (u32, u32) {
-    // ELC event numbers (bsp_elc.h): RXI/TXI per channel.
+    // ELC event numbers (bsp_elc.h): RXI/TXI per channel. SCI3-8 have
+    // no event codes on this part: modeled polled-only (event 0 = none).
     match hw_ch {
         0 => (152, 153),
         1 => (158, 159),
         2 => (163, 164),
         9 => (168, 169),
-        _ => (152, 153),
+        _ => (0, 0),
     }
 }
 

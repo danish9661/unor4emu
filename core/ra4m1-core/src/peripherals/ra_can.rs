@@ -43,6 +43,7 @@ pub struct RaCan {
     pending_tx: Option<usize>,
     nmlst: bool,
     ts: u16,
+    last_search: u8,
 }
 
 impl RaCan {
@@ -56,6 +57,7 @@ impl RaCan {
             pending_tx: None,
             nmlst: false,
             ts: 0,
+            last_search: 0,
         }))
     }
     fn canm(&self) -> u16 {
@@ -114,6 +116,20 @@ impl RaCan {
             crate::system::icu_raise_event(sys, CAN0_MBOX_TX_EVENT);
         }
     }
+    fn search_result(&mut self) -> u8 {
+        let found = match self.mem[0x853] & 3 {
+            0 => (0..32).find(|&m| self.is_rx(m) && self.newdata[m]),
+            1 => (0..32).find(|&m| !self.is_rx(m) && self.sent[m]),
+            _ => (0..32).find(|&m| self.msglost[m] || self.trmabt[m]),
+        };
+        match found {
+            Some(mb) => {
+                self.last_search = mb as u8;
+                mb as u8
+            }
+            None => self.last_search,
+        }
+    }
     fn str_read(&self) -> u16 {
         let mut v = 0u16;
         if self.newdata.iter().any(|&b| b) { v |= 1 << 0; }
@@ -149,7 +165,11 @@ impl Peripheral for RaCan {
             } else if (0x854..0x856).contains(&i) {
                 self.ts.to_le_bytes()[i - 0x854]
             } else if i == 0x852 {
-                0 // MSSR: search not modeled
+                // MSSR: mailbox search result for the MSMR mode (the FSP
+                // ISRs search instead of scanning: 0 RX/NEWDATA, 1 TX done,
+                // 2 message-lost/aborted). Lowest match wins; no match
+                // keeps the previous value like HW latching.
+                self.search_result()
             } else {
                 self.mem[i]
             };
@@ -206,6 +226,12 @@ impl Peripheral for RaCan {
             if idx == CTLR || idx == CTLR + 1 {
                 let oldm = self.canm();
                 self.mem[idx] = v;
+                // TSRC (b5) is a strobe: HW resets the stamp counter
+                // and clears it (FSP polls for the clear after open).
+                if idx == CTLR && v & (1 << 5) != 0 {
+                    self.mem[CTLR] &= !(1 << 5);
+                    self.ts = 0;
+                }
                 // Leaving operation with a queued TX aborts it.
                 if oldm == 0 && self.canm() != 0 {
                     self.abort_pending();

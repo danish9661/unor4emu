@@ -53,21 +53,22 @@ Bases from `R7FA4M1AB.h`. "Arduino use" = what ArduinoCore-renesas
 | SYSC/MSTP | `0x4001_E000`/`0x4004_6FFC` | accept-and-retain stubs | boot proofs |
 | ICU | `0x4000_6000` | IELSR routing mirror | ELC/USB/CAN/CTSU IRQ proofs |
 | ELC | `0x4004_1000` | link table + soft trigger (GPT/ADC dispatch) | elc routes event |
-| SCI0,1,2,9 | `0x4007_0000`+ch*`0x20` | `ra_sci.rs` UART byte-exact + simple-SPI mode | TX console, echo path, SPI loopback |
-| GPT0-7 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven | counts + matches |
-| AGT0-1 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` down-counter, latched reload, TUNDF | counts, millis IRQs |
+| SCI0-9 | `0x4007_0000`+ch*`0x20` | `ra_sci.rs` UART byte-exact + simple-SPI mode (ch4-9 eventless polled) | TX console, echo path, SPI loopback, Serial1 proof (SCI2) |
+| GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven (ch8-13 eventless) | counts + matches |
+| AGT0-5 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` down-counter, latched reload, TUNDF (ch2-5 eventless) | counts, millis IRQs |
 | ADC0/1 | `0x4005_C000`/`0x4005_C200` | `ra_analog.rs` ADST=bit15, overrides | converts channel |
 | DAC12 | `0x4005_E000` | retained output | dac retained |
-| RTC | `0x4004_4000` | time + alarm IRQ (event 38) | ticks seconds |
-| DMAC0-3/DTC | `0x4000_5000`/`0x4000_5400` | memcopy path | mem-to-mem |
-| WDT/IWDT | `0x4004_4200`/`0x4004_4400` | countdown + reset flags | (no dedicated proof) |
+| RTC | `0x4004_4000` | time (BCD) + alarm IRQ (event 38) | ticks, alarm event, RTC lib firmware proof (minute rollover) |
+| DMAC0-7/DTC | `0x4000_5000`/`0x4000_5400` | memcopy path (ch4-7 eventless) | mem-to-mem |
+| WDT/IWDT | `0x4004_4200`/`0x4004_4400` | countdown + reset flags, TOPS period | WDT lib refresh + expiry proofs |
 | CRC/DOC | `0x4007_4000`/`0x4005_4100` | IEEE-802.3 / compare | crc_and_doc |
-| OPAMP/ACMP | `0x4008_6000`/`0x4008_5E00` | follower loopback + compare | opamp proof |
+| OPAMP/ACMP | `0x4008_6000`/`0x4008_5E00` | follower loopback + compare | opamp proof + OPAMP lib firmware proof (AMPMON0) |
 | USBFS device | `0x4009_0000` | `ra_usb.rs` FIFOs, BEMP/BRDY/CTRT/DVST, CCPL strobe, byte FIFO reads | enumerate, hello, echo (100B), TX capture |
 | CTSU | `0x4008_1000` | STRT->tick counters + END event | measures + overflow |
-| CAN0 | `0x4005_0000` | mailboxes + self-test loopback | loopback proof |
-| IIC0/1 | `0x4005_3000`/`0x4005_3100` | master + virtual EEPROM @0x50 | eeprom proof + Wire firmware proof |
+| CAN0 | `0x4005_0000` | mailboxes + self-test loopback (MSSR search + TSRC strobe) | loopback proof + Arduino_CAN firmware proof |
+| IIC0-2 | `0x4005_3000`+ch*`0x100` | master + virtual EEPROM @0x50 (IIC2 eventless) | eeprom proof + Wire firmware proof |
 | SPI0/1 | `0x4007_2000`/`0x4007_2100` | RSPI master, polled SPRF + loopback | loopback proof + SPI firmware proof (ch1) |
+| ICU ext-IRQ | `0x4000_6000` | IRQCR sense + `icu_pin_edge` injection, IELSR routing | pin-IRQ + attachInterrupt proofs (all 16 lines) |
 | ARM | `0xE000_xxxx` | NVIC/SysTick/SCB/MPU/FPU/DWT/STIR/ITM reused | legacy CPU suite |
 
 Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
@@ -83,19 +84,14 @@ Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
 - **IIC**: master proven incl. firmware; slave mode not modeled (SARs retain-only).
 - **SCI-SPI / RSPI**: master proven; slave mode not modeled; RSPI assumes 8-bit frames.
 - **USBFS**: device only; no suspend/resume, no HID endpoints.
-- **SCI3-8**: unmapped. No Arduino Minima consumer (Serial=USB, Serial1=SCI2).
-- **GPT8-13 / AGT2-5**: unmapped. Same stride as modeled channels — trivial to extend, no Arduino consumer found.
-- **IIC2**: unmapped (`TWOWIRE` uses IIC0-1 in practice; same stride, trivial).
 - **CAN1**: unmapped — no routable mailbox events on this part.
 - **DAC8** (`0x4009_E000`): unmapped. Arduino AnalogWave uses DAC12.
-- **WDT/IWDT, RTC**: modeled, no dedicated firmware proof (RTC/WDT Arduino libs exist).
-- **OPAMP/ACMP**: register proofs only (Arduino OPAMP lib exists, no firmware proof yet).
-- **GPIO input**: works via injection hook (`set_input`, like `uart_rx_byte`); pin-change interrupts do NOT exist (see missing).
+- **GPIO input**: works via injection hook (`set_input`, like `uart_rx_byte`); pin levels feed `icu_pin_edge` for external IRQs.
 - **Clocks**: no tree modeling — fixed 48MHz/PCLKB assumptions baked into dividers (AGT /8). `SystemInit` writes are accepted, never interpreted.
 
 ### Missing (deliberate or future)
 
-- **External pin interrupts** (`attachInterrupt`, ICU IRQCR/NMI): the biggest Arduino-visible gap. IELSR routes peripheral events only; no pin-edge injection exists. Fix shape is clear (`icu_raise_pin` + PFS config), needs a proof sketch with a button press.
+- **External pin interrupts** (`attachInterrupt`, ICU IRQCR/NMI): DONE — `icu_pin_edge` injection, all 16 lines proven with a button sketch.
 - **EEPROM / dataflash programming** (FACI): Arduino EEPROM lib has no backing. Needs a dataflash model.
 - **I2S audio** (SSI0/1 `0x4004_E000`): Arduino I2S lib exists; SSI unmodeled.
 - **USB HID endpoints**: CDC-only USB. HID needs report endpoints + a proof sketch.
@@ -108,14 +104,10 @@ Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
 - Tests must run `--test-threads=1` (shared `SYS`, instruction count, UART buffer).
 - `rx_inject` raises BRDY like HW; CCPL is a strobe; CFIFO OUT drains are single bytes.
 - RIIC: ST auto-sets MST/TRS; TDRE+TXI fire on START; enables fire latched flags; first RXI read is a dummy (no byte0 preload); restart-write has no completion event (FSP quirk, tolerated).
-- Virtual-time assumptions: AGT/RTC run on instruction count; ADC converts instantly; CAN loopback needs self-test mode; I2C slave jig lives at 0x50; SPI loopback is a test jig (open bus reads 0xFF).
+- Virtual-time assumptions: AGT/RTC/WDT run on instruction count (WDT FSP default is TOPS=3 = 4096 ticks); ADC converts instantly; CAN loopback needs self-test mode; I2C slave jig lives at 0x50; SPI loopback is a test jig (open bus reads 0xFF); the RTC alarm is evaluated against the current second on each tick, so tests step second-by-second.
 - Vendored firmware (`core/blinky/r4*.bin`) is built with arduino-cli 1.6.0 and committed; `demo/pkg` + `demo/fw` are generated (git-ignored, `./demo/build.sh` rebuilds).
 
 ## What's next (priority order)
 
-1. **attachInterrupt** (pin IRQs) — biggest real-sketch gap; model + button-press proof.
-2. **Serial1 proof** (SCI2 TX via console + RX inject) — small, closes UART.
-3. **Firmware proofs for existing models**: CAN (Arduino_CAN loopback?), OPAMP lib, RTC lib, WDT lib — all register-proven already, each is one sketch + one test.
-4. **Completeness loops** (all trivial, same-stride): AGT2-5, GPT8-13, SCI4-8, IIC2, DMAC4-7.
-5. **New models**: EEPROM/dataflash (FACI), I2C slave mode, SPI slave mode, CAN FIFO mode, CTSU mutual mode, USB HID endpoints, virtual SD slave.
-6. **Platform**: browser demo extensions (Wire/SPI tabs), WiFi un-park (ESP32-S3), LED-matrix-from-GPIO.
+1. **New models**: EEPROM/dataflash (FACI), I2C slave mode, SPI slave mode, CAN FIFO mode, CTSU mutual mode, USB HID endpoints + suspend/resume, virtual SD slave.
+2. **Platform**: browser demo extensions (Wire/SPI tabs), WiFi un-park (ESP32-S3), LED-matrix-from-GPIO.

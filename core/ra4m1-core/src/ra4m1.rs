@@ -249,6 +249,30 @@ mod tests {
     }
 
     #[test]
+    fn ra4m1_map_rtc_alarm() {
+        // RTC alarm: second-alarm at :00 raises ELC event 38, routed
+        // here to IRQ5. Stepped second by second so the match instant
+        // is observed (a multi-second jump would skip it).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 5 * 4, 4, 38); // IELSR5 = RTC_ALARM
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 5);     // ISER0: IRQ5
+        sys.p.write(sys, RTC_BASE + 0x0E, 1, 1);      // START
+        sys.p.write(sys, RTC_BASE + 0x00, 1, 58);     // sec=58
+        sys.p.write(sys, RTC_BASE + 0x02, 1, 0);      // min=0
+        sys.p.write(sys, RTC_BASE + 0x04, 1, 0);      // hr=0
+        sys.p.write(sys, RTC_BASE + 0x10, 4, 0x0001_00); // ALRM = 00:01:00 (min rolls at :00)
+        sys.p.write(sys, RTC_BASE + 0x14, 1, 7);      // ALMEN: all fields
+        for _ in 0..4 {
+            crate::system::INSTRUCTION_COUNT.fetch_add(480_000, std::sync::atomic::Ordering::Relaxed);
+            sys.tick();
+        }
+        assert!(sys.p.nvic.borrow().has_pending(), "ALARM event pending");
+    }
+
+    #[test]
     fn ra4m1_map_dmac_mem_to_mem() {
         use crate::cpu::mem::Memory;
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -347,6 +371,40 @@ mod tests {
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 1);
         sys.p.write(sys, ACMPLP_BASE + 0x10, 4, 0x100);
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 0);
+    }
+
+    #[test]
+    fn ra4m1_opamp_firmware() {
+        // End-to-end OPAMP on the real Arduino driver: the sketch calls
+        // OPAMP.begin() (ch0, high-speed); the FSP read-modify-write of
+        // AMPC must stick and AMPMON0 must report the channel running.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4opamp.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let mut ok = false;
+        for _ in 0..400 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if sys.p.read(sys, OPAMP_BASE + 0x0C, 1) & 1 == 1 {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "AMPMON0 never set by OPAMP.begin()");
     }
 
     #[test]
@@ -761,6 +819,175 @@ mod tests {
         crate::system::icu_raise_event(sys, 51);
         run_until(sys, &mut mem, &mut cpu, 2_000_000, || false);
         assert!(cpu.fault.is_none());
+    }
+
+    #[test]
+    fn ra4m1_map_icu_pin_irq() {
+        // External pin interrupt routing: IRQCR sense-gates the virtual
+        // button, ELC event 1 (IRQ0) pends the IELSR-mapped IRQ.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 13 * 4, 4, 1); // IELSR13 = IRQ0
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 13);    // ISER0: IRQ13
+        sys.p.write(sys, 0x4000_6000, 1, 0x01); // IRQCR0 = rising
+        assert!(!crate::system::icu_pin_edge(sys, 0, true), "falling ignored");
+        assert!(!sys.p.nvic.borrow().has_pending(), "nothing pends");
+        assert!(crate::system::icu_pin_edge(sys, 0, false), "rising fires");
+        assert!(sys.p.nvic.borrow().has_pending(), "IRQ13 pends");
+        sys.p.write(sys, 0x4000_6000, 1, 0x00); // IRQCR0 = falling
+        assert!(crate::system::icu_pin_edge(sys, 0, true), "falling fires");
+        assert!(!crate::system::icu_pin_edge(sys, 16, true), "bad line");
+    }
+
+    #[test]
+    fn ra4m1_attach_interrupt() {
+        // End-to-end attachInterrupt: real FSP external-IRQ setup on a
+        // digital pin, virtual falling edges on every line (only the
+        // firmware-routed one pends), ISR toggles the LED (PORT scan).
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4irq.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        for line in 0..16usize {
+            crate::system::icu_pin_edge(sys, line, true);
+        }
+        let mut toggled = false;
+        for _ in 0..200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "no PORT output change after pin edges");
+    }
+
+    #[test]
+    fn ra4m1_serial1_echo() {
+        // End-to-end Serial1 (D0/D1 probe to SCI2): boot the echo sketch,
+        // find the TE-enabled channel, inject bytes, expect the exact
+        // echo on the UART console. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4serial1.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        crate::system::get_uart_output().lock().unwrap().clear();
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        // Discover the channel FSP put in UART TX mode (SCR.TE).
+        let mut ch_base = None;
+        for _ in 0..200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            for hw in [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
+                let base = SCI0_BASE + hw * 0x20;
+                if sys.p.read(sys, base + 0x02, 1) & (1 << 5) != 0 {
+                    ch_base = Some(base);
+                    break;
+                }
+            }
+            if ch_base.is_some() {
+                break;
+            }
+        }
+        let base = ch_base.expect("no TE-enabled SCI channel");
+        for b in [b'H', b'i'] {
+            assert!(crate::peripherals::ra_sci::sci_rx_inject(sys, base, b));
+            let mut echoed = false;
+            for _ in 0..200 {
+                cpu.run(sys, &mut mem, 48_000);
+                sys.tick();
+                assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+                if crate::system::get_uart_output().lock().unwrap().as_str().contains(b as char) {
+                    echoed = true;
+                    break;
+                }
+            }
+            assert!(echoed, "no echo of {:?}", b as char);
+        }
+    }
+
+    #[test]
+    fn ra4m1_map_extra_channels() {
+        // Same-stride siblings without ELC events (polled only): AGT2,
+        // GPT8, SCI5, IIC2, DMAC ch5. Spot-check counters and data paths.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // AGT2 down-counter.
+        sys.p.write(sys, 0x4008_4200, 2, 500);
+        sys.p.write(sys, 0x4008_4208, 1, 1);
+        crate::system::INSTRUCTION_COUNT.fetch_add(100, std::sync::atomic::Ordering::Relaxed);
+        sys.tick();
+        let cnt = sys.p.read(sys, 0x4008_4200, 2) & 0xFFFF;
+        assert!(cnt > 0 && cnt < 500, "agt2 cnt={}", cnt);
+        // GPT8 16-bit counter with period.
+        sys.p.write(sys, 0x4007_8808, 4, 200);
+        sys.p.write(sys, 0x4007_8800, 4, 1);
+        crate::system::INSTRUCTION_COUNT.fetch_add(100, std::sync::atomic::Ordering::Relaxed);
+        sys.tick();
+        let g = sys.p.read(sys, 0x4007_8804, 4);
+        assert!(g > 0 && g <= 200, "gpt8 cnt={}", g);
+        // SCI5 UART TX reaches the console.
+        crate::system::get_uart_output().lock().unwrap().clear();
+        sys.p.write(sys, 0x4007_00A0 + 0x02, 1, 0x20);
+        sys.p.write(sys, 0x4007_00A0 + 0x03, 1, b'K' as u32);
+        assert_eq!(crate::system::get_uart_output().lock().unwrap().as_str(), "K");
+        // IIC2 flags accept a START.
+        sys.p.write(sys, 0x4005_3200, 1, 0x80); // ICE
+        sys.p.write(sys, 0x4005_3201, 1, 0x02); // ST
+        assert_ne!(sys.p.read(sys, 0x4005_3201, 1) & (1 << 7), 0, "iic2 BBSY");
+        assert_ne!(sys.p.read(sys, 0x4005_3201, 1) & (1 << 6), 0, "iic2 MST");
+        sys.p.write(sys, 0x4005_3201, 1, 0x08); // SP
+        sys.tick();
+        assert_eq!(sys.p.read(sys, 0x4005_3201, 1) & (1 << 7), 0, "iic2 free");
+        // DMAC ch5 mem-to-mem.
+        let mut mem = ra4m1_memory();
+        for i in 0..8u32 { mem.write8(0x20000000 + i, (0xC0 + i) as u8); }
+        sys.p.write(sys, 0x4000_5000 + 5 * 0x40 + 0x00, 4, 0x20000000);
+        sys.p.write(sys, 0x4000_5000 + 5 * 0x40 + 0x04, 4, 0x20000100);
+        sys.p.write(sys, 0x4000_5000 + 5 * 0x40 + 0x08, 4, 8);
+        mem.write32(0x4000_5000 + 5 * 0x40 + 0x0C, 1);
+        assert_eq!(sys.pending_dma_count(), 0);
+        for i in 0..8u32 {
+            assert_eq!(mem.read8(0x20000100 + i), (0xC0 + i) as u8, "dma5 byte {}", i);
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 157) and `cargo build` green in the
+  `core/ra4m1-periph-wasm` (currently 167) and `cargo build` green in the
   top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -115,7 +115,15 @@ wasm wrappers can path-depend on it).
   loopback), IIC0/1 (RIIC master vs virtual EEPROM slave at 0x50, Wire
   sketch round-trips on real FSP), SCI simple-SPI (shift + loopback jig),
   SPI0/1 (RSPI master, polled SPRF + loopback; Arduino D11-13 probe to
-  ch1, SPI firmware proof round-trips on real FSP).
+  ch1, SPI firmware proof round-trips on real FSP), channel loops
+  (SCI0-9, GPT0-13, AGT0-5, IIC2, DMAC0-7 mapped; extras eventless polled),
+  attachInterrupt (ICU IRQCR sense + `icu_pin_edge` injection, all 16 lines
+  proven with a button sketch), Serial1 (SCI2 TE discovery + echo),
+  CAN firmware proof (Arduino_CAN self-test loopback via MSSR search +
+  TSRC strobe), RTC alarm (event 38) + RTC lib firmware proof (BCD minute
+  rollover), WDT lib proofs (refresh holds 5000 chunks, expiry latches;
+  FSP uses TOPS=3 = 4096 ticks), OPAMP lib firmware proof (`OPAMP.begin()`
+  -> AMPMON0).
 - Hard-won truths: RA4M1 bases differ from RA6 everywhere (this §3 is from
   R7FA4M1AB.h, never assume); SYSC OPCCR resets 0x00 with timed TSF;
   AGT reload latches the programmed counter (AGTCMA untouched when output
@@ -138,7 +146,8 @@ wasm wrappers can path-depend on it).
   completion event (no STOP by design - tolerated, real sketches ignore
   its return too); RSPI D11-13 probe to SPI1 (0x40072100), polled SPRF,
   SPDR byte lane is +0x04.
-- NEXT: browser demo page. LED matrix (WiFi board)
+- NEXT: new models (EEPROM/dataflash, slave modes, CAN FIFO, CTSU mutual,
+  USB HID, virtual SD), demo Wire/SPI tabs. LED matrix (WiFi board)
   renders from RA GPIO pins, not as a peripheral.
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
@@ -159,7 +168,10 @@ wasm wrappers can path-depend on it).
 `ra4m1_map_can_loopback`, `ra4m1_map_i2c_eeprom`,
 `ra4m1_map_sci_spi_loopback`, `ra4m1_wire_ok`,
 `ra4m1_ite_add_imm_preserves_flags`, `ra4m1_map_spi_loopback`,
-`ra4m1_spi_ok`.
+`ra4m1_spi_ok`, `ra4m1_can_ok`, `ra4m1_map_icu_pin_irq`,
+`ra4m1_attach_interrupt`, `ra4m1_serial1_echo`,
+`ra4m1_map_extra_channels`, `ra4m1_rtc_firmware`, `ra4m1_map_rtc_alarm`,
+`ra4m1_wdt_refresh`, `ra4m1_wdt_expire`, `ra4m1_opamp_firmware`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
 

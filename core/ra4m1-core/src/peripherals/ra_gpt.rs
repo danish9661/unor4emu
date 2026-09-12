@@ -6,6 +6,8 @@ use super::Peripheral;
 // GTCCRA/B (compare), GTIOR (IO), GTINTAD (IRQ enable), GTST (status).
 // Counting is instruction-count driven like the STM32 Timer model.
 // Compare IRQs use ICU event routing (GPT0_CCMPA=87, stride 8 per channel).
+// GPT8-13 exist as counters but have no ELC event codes on this part,
+// so their compares set flags without raising (event 0 = none).
 pub const GPT_BASE: u32 = 0x4007_8000; // ch stride 0x100
 
 pub struct RaGpt {
@@ -30,7 +32,7 @@ impl RaGpt {
             gtcr: 0, gtcnt: 0, gtpr: 0xFFFF_FFFF, gtccra: 0xFFFF_FFFF,
             gtccrb: 0xFFFF_FFFF, gtior: 0, gtintad: 0, gtst: 0,
             last_tick: instruction_count(),
-            ccmpa_event: 87 + ch as u32 * 8, is32, ch,
+            ccmpa_event: if ch < 8 { 87 + ch as u32 * 8 } else { 0 }, is32, ch,
         }))
     }
 

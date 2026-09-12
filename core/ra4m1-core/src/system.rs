@@ -189,6 +189,21 @@ pub fn icu_set_ielsr(irq: usize, event: u32) {
     }
 }
 
+/// Inject an external-pin edge on ICU IRQ `line` (virtual button press
+/// for `attachInterrupt` sketches). Returns whether the line's IRQCR
+/// sense matched (and the event fired).
+pub fn icu_pin_edge(sys: &WasmSystem, line: usize, falling: bool) -> bool {
+    for slot in sys.p.peripherals.iter() {
+        if slot.start == crate::peripherals::ra_icu::ICU_BASE {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(u) = b.as_any_mut().downcast_mut::<crate::peripherals::ra_icu::RaIcu>() {
+                return u.pin_edge(sys, line, falling);
+            }
+        }
+    }
+    false
+}
+
 pub fn icu_raise_event(sys: &WasmSystem, event: u32) {
     if event == 0 {
         return;

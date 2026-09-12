@@ -172,13 +172,15 @@ impl Peripheral for RaAgt {
 }
 
 // ---- WDT / IWDT: countdown + shared reset flags ----
+// WDTCR+0x02 TOPS[1:0] programs the virtual period (one tick ~= one
+// test chunk here, not wall time); any WDTRR write refreshes to it.
 pub struct RaWdt {
-    wdtrr: u8, wdtsr: u16, down: u32,
+    wdtrr: u8, wdtsr: u16, down: u32, reload: u32,
 }
 
 impl RaWdt {
     pub fn new() -> Option<Box<dyn Peripheral>> {
-        Some(Box::new(Self { wdtrr: 0, wdtsr: 0, down: 1_000_000 }))
+        Some(Box::new(Self { wdtrr: 0, wdtsr: 0, down: 1_000_000, reload: 1_000_000 }))
     }
 }
 
@@ -200,14 +202,37 @@ impl Peripheral for RaWdt {
             _ => 0,
         }
     }
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
-        match offset {
-            0x00 => {
-                self.wdtrr = (value & 0xFF) as u8;
-                self.down = 1_000_000; // refresh
-                self.wdtsr &= !(1 << 7);
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
+        self.write_sized(sys, offset, value, 0, 4);
+    }
+    fn write_sized(&mut self, _sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        // Real layout: WDTRR+0x00, WDTCR+0x02, WDTSR+0x04. The bus hands
+        // merged words, so dispatch per byte (a WDTCR config write must
+        // not look like a WDTRR refresh).
+        let base = (offset & !3) as usize;
+        for i in 0..size as usize {
+            if byte_offset as usize + i >= 4 { continue; }
+            let idx = base + byte_offset as usize + i;
+            let v = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
+            match idx {
+                0x00 => {
+                    self.wdtrr = v;
+                    self.down = self.reload; // refresh
+                    self.wdtsr &= !(1 << 7);
+                }
+                0x02 => {
+                    // WDTCR TOPS[1:0] programs the virtual period (ticks
+                    // here scale like test chunks, monotonic in timeout).
+                    self.reload = match v & 3 {
+                        0 => 64,
+                        1 => 256,
+                        2 => 1024,
+                        _ => 4096,
+                    };
+                    self.down = self.reload;
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }

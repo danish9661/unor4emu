@@ -23,8 +23,9 @@ use super::Peripheral;
 // the FSP blocking master flow (poll TDRE/TEND/RDRF).
 pub const IIC0_BASE: u32 = 0x4005_3000;
 pub const IIC1_BASE: u32 = 0x4005_3100;
-// ELC events (bsp_elc.h): RXI/TXI/TEI/ERI per channel.
-const EVTS: [[u32; 4]; 2] = [[53, 54, 55, 56], [58, 59, 60, 61]];
+// ELC events (bsp_elc.h): RXI/TXI/TEI/ERI per channel. IIC2 has no
+// event codes on this part: modeled polled-only (event 0 = none).
+const EVTS: [[u32; 4]; 3] = [[53, 54, 55, 56], [58, 59, 60, 61], [0, 0, 0, 0]];
 const SLAVE_ADDR: u8 = 0x50;
 
 pub struct RaIic {
@@ -49,7 +50,7 @@ pub struct RaIic {
 
 impl RaIic {
     pub fn new_ch(ch: usize) -> Option<Box<dyn Peripheral>> {
-        if ch > 1 {
+        if ch > 2 {
             return None;
         }
         Some(Box::new(Self {
