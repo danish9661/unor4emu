@@ -50,7 +50,7 @@ impl Peripheral for RaIcu {
         // IELSR[n]: low 8 bits select the event (retain full word too).
         if (0x300..0x300 + 96 * 4).contains(&offset) && offset % 4 == 0 {
             let irq = ((offset - 0x300) / 4) as usize;
-            crate::system::icu_set_ielsr(irq, value & 0x1FF);
+            crate::system::icu_set_ielsr(irq, value);
         }
         self.regs.insert(offset, value);
     }

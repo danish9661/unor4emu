@@ -176,8 +176,7 @@ pub struct SpiSd {
 }
 
 impl SpiSd {
-    pub fn new() -> Self {
-        let mut disk = vec![0u8; SD_BLOCKS * 512];
+    pub fn new() -> Self {        let mut disk = vec![0u8; SD_BLOCKS * 512];
         for b in 0..SD_BLOCKS {
             for i in 0..512 {
                 disk[b * 512 + i] = ((b * 512 + i).wrapping_mul(7).wrapping_add(3)) as u8;
@@ -310,6 +309,15 @@ impl SpiSd {
             true
         } else {
             false
+        }
+    }
+    /// Copy out one 512B block for host-side inspection (demo block
+    /// viewer). Returns None for out-of-range blocks.
+    pub fn read_block(&self, b: usize) -> Option<Vec<u8>> {
+        if b < SD_BLOCKS {
+            Some(self.disk[b * 512..b * 512 + 512].to_vec())
+        } else {
+            None
         }
     }
 }

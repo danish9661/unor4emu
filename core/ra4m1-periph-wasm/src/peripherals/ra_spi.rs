@@ -312,4 +312,13 @@ impl SpiSd {
             false
         }
     }
+    /// Copy out one 512B block for host-side inspection (demo block
+    /// viewer). Returns None for out-of-range blocks.
+    pub fn read_block(&self, b: usize) -> Option<Vec<u8>> {
+        if b < SD_BLOCKS {
+            Some(self.disk[b * 512..b * 512 + 512].to_vec())
+        } else {
+            None
+        }
+    }
 }

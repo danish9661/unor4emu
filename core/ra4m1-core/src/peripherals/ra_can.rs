@@ -12,7 +12,7 @@ use super::Peripheral;
 //   CTLR+0x840 (CANM[9:8]: 0 operation, 1 reset, 2/3 halt), STR+0x842
 //     (RO: NDST b0, SDST b1, NMLST b4, TABST b6, RSTST b8, HLTST b9,
 //     TRMST b13, RECST b14), BCR+0x844, RFCR+0x848, TFCR+0x84A,
-//   EIER+0x84C, EIFR+0x84D, RECR+0x84E/ECR (RO, always 0), TSR+0x854
+//   EIER+0x84C, EIFR+0x84D (W0C), RECR+0x84E/TECR+0x84F (live, saturating), TSR+0x854
 //   (RO free-running stamp), AFSR+0x856, TCR+0x858 (TSTE b0,
 //     TSTM[2:1]: self-test loopback modes).
 // Model: everything retains; TX request (TRMREQ on a TX mailbox)
@@ -60,6 +60,14 @@ pub struct RaCan {
     /// TX FIFO queue (latched from the MB24 write port by TFPCR=0xFF).
     tx_fifo: std::collections::VecDeque<[u8; 14]>,
     rfmlf: bool,
+    /// Error counters (RECR/TECR, saturating) + latched EIFR flags.
+    /// The virtual wire never frames-errors on its own, so errors arrive
+    /// via `inject_errors` (test jig, like the CTSU overrides): the
+    /// firmware-visible surface (counters, EWF/EPF/BOEF, ERI) is exactly
+    /// what a real error storm shows the FSP driver.
+    recr: u8,
+    tecr: u8,
+    eifr: u8,
 }
 
 impl RaCan {
@@ -77,6 +85,9 @@ impl RaCan {
             rx_fifo: std::collections::VecDeque::new(),
             tx_fifo: std::collections::VecDeque::new(),
             rfmlf: false,
+            recr: 0,
+            tecr: 0,
+            eifr: 0,
         }))
     }
     fn canm(&self) -> u16 {
@@ -105,6 +116,30 @@ impl RaCan {
     fn abort_pending(&mut self) {
         if let Some(n) = self.pending_tx.take() {
             self.trmabt[n] = true;
+        }
+    }
+    /// Test-jig error injection (stuff errors on the virtual wire):
+    /// RX errors add 1, TX errors add 8 per CAN rule; EWF latches at 96,
+    /// EPF at 128, TEC saturates at 255 with BOEF (bus-off). Enabled
+    /// flags (EIER) raise the ERI event for the FSP driver.
+    pub(crate) fn inject_errors(&mut self, sys: &System, rx: u16, tx: u16) {
+        self.recr = self.recr.saturating_add(rx.min(255) as u8);
+        let t = self.tecr as u16 + tx.min(2040);
+        if t > 255 {
+            self.tecr = 255;
+            self.eifr |= 1 << 3; // BOEF
+        } else {
+            self.tecr = t as u8;
+        }
+        if self.recr >= 96 || self.tecr >= 96 {
+            self.eifr |= 1 << 1; // EWF
+        }
+        if self.recr >= 128 || self.tecr >= 128 {
+            self.eifr |= 1 << 2; // EPF
+        }
+        let eier = self.mem[0x84C];
+        if self.eifr & eier & 0x0E != 0 {
+            crate::system::icu_raise_event(sys, 74); // ELC_EVENT_CAN0_ERROR
         }
     }
     fn rfe(&self) -> bool { self.mem[0x848] & 1 != 0 }
@@ -240,8 +275,13 @@ impl Peripheral for RaCan {
                 self.rfcr_read()
             } else if i == 0x84A {
                 self.tfcr_read()
-            } else if i == 0x84E || i == 0x84F {
-                0 // RECR/TECR: no errors on the virtual wire
+            } else if i == 0x84D {
+                // EIFR live error flags (W0C in write_sized).
+                self.eifr
+            } else if i == 0x84E {
+                self.recr
+            } else if i == 0x84F {
+                self.tecr
             } else if (0x854..0x856).contains(&i) {
                 self.ts.to_le_bytes()[i - 0x854]
             } else if i == 0x852 {
@@ -274,6 +314,11 @@ impl Peripheral for RaCan {
             if (STR..STR + 2).contains(&idx) || idx == 0x84E || idx == 0x84F
                 || idx == 0x852 || (0x854..0x856).contains(&idx)
             {
+                continue;
+            }
+            if idx == 0x84D {
+                // EIFR: write 0 clears latched flags (W0C), 1s ignored.
+                self.eifr &= v;
                 continue;
             }
             if idx == 0x848 {

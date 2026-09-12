@@ -126,6 +126,20 @@ pub fn spi_set_loopback(addr: u32, on: bool) {
     system::sci_set_spi_loopback(addr, on);
 }
 
+/// Arm the virtual SD card (SPI mode) on an RSPI channel base, or not.
+/// When armed, the channel's master MOSI stream feeds the SD engine.
+/// Off by default.
+#[wasm_bindgen]
+pub fn spi_set_sd_card(addr: u32, on: bool) {
+    system::spi_set_sd_card(addr, on);
+}
+
+/// Copy out one 512B virtual-SD block (empty when out of range).
+#[wasm_bindgen]
+pub fn sd_read_block(block: u32) -> Vec<u8> {
+    system::sd_read_block(block)
+}
+
 /// Inject an external-pin edge on ICU IRQ line (virtual button press
 /// for `attachInterrupt` sketches). Returns whether the line fired.
 #[wasm_bindgen]

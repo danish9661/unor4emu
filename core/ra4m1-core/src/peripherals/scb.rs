@@ -171,7 +171,11 @@ impl Peripheral for Scb {
         }
         match offset {
             0x04 => self.write_icsr(value, sys),
-            0x08 => self.vtor = value & 0xFFFF_FC00,
+            // TBLOFF keeps bits[31:7] (128B alignment): Arduino parks
+            // its RAM vector table at 0x20007F00, which a 1KB mask
+            // would mangle to 0x20007C00 (every IRQ then vectors
+            // into stack garbage instead of the installed handler).
+            0x08 => self.vtor = value & 0xFFFF_FF80,
             0x0C => self.write_aircr(value),
             0x10 => self.scr = value & 0x1E,
             0x14 => {

@@ -53,7 +53,7 @@ impl Peripheral for RaIcu {
             if std::env::var("ICULOG").is_ok() && irq < 12 {
                 eprintln!("ICULOG ielsr[{}] = {}", irq, value & 0x1FF);
             }
-            crate::system::icu_set_ielsr(irq, value & 0x1FF);
+            crate::system::icu_set_ielsr(irq, value);
         }
         self.regs.insert(offset, value);
     }

@@ -17,6 +17,10 @@ pub trait Memory {
     fn write8(&mut self, addr: u32, v: u8);
     fn write16(&mut self, addr: u32, v: u16);
     fn write32(&mut self, addr: u32, v: u32);
+    /// Drain staged DMA/DTC transfers. The run loop calls this every 16
+    /// instructions while dma_active() is set; peripheral writes call it
+    /// unconditionally after staging.
+    fn service_sync_dma(&mut self) {}
 }
 
 pub struct MemRegion {
@@ -152,7 +156,126 @@ impl FlatMemory {
     /// the very next instructions — only an inline move satisfies that, the
     /// way the pre-latch model behaved. Peripheral transfers stay staged:
     /// their data path lives in the JS driver.
-    fn service_sync_dma(&mut self) {
+
+    /// DTC activations queued by event dispatch (IELSR.DTCE): resolve the
+    /// SRAM vector table + transfer_info fresh on every fire (so
+    /// R_DTC_Reconfigure is honored with no extra modeling), move one
+    /// transfer unit, maintain repeat counting in system state, and
+    /// write back advanced pointers like HW. Peripheral destinations
+    /// (e.g. DAC DADR) go through the bus; RAM through the flat array.
+    fn service_dtc(&mut self) {
+        while let Some(irq) = crate::system::dtc_take_pending() {
+            self.dtc_fire(irq);
+        }
+    }
+    fn rd_ram_u32(&self, a: u32) -> u32 {
+        (self.read_ram_byte(a) as u32)
+            | ((self.read_ram_byte(a.wrapping_add(1)) as u32) << 8)
+            | ((self.read_ram_byte(a.wrapping_add(2)) as u32) << 16)
+            | ((self.read_ram_byte(a.wrapping_add(3)) as u32) << 24)
+    }
+    fn rd_ram_u16(&self, a: u32) -> u16 {
+        (self.read_ram_byte(a) as u16) | ((self.read_ram_byte(a.wrapping_add(1)) as u16) << 8)
+    }
+    fn wr_ram_u32(&mut self, a: u32, v: u32) {
+        self.write_ram_byte(a, (v & 0xFF) as u8);
+        self.write_ram_byte(a.wrapping_add(1), ((v >> 8) & 0xFF) as u8);
+        self.write_ram_byte(a.wrapping_add(2), ((v >> 16) & 0xFF) as u8);
+        self.write_ram_byte(a.wrapping_add(3), ((v >> 24) & 0xFF) as u8);
+    }
+    fn dtc_fire(&mut self, irq: u32) {
+        let sys = crate::sys();
+        let vbr = sys.p.read(sys, 0x4000_5400 + 4, 4);
+        let info = self.rd_ram_u32(vbr.wrapping_add(irq.wrapping_mul(4)));
+        if !self.in_ram(info) || !self.in_ram(info.wrapping_add(15)) {
+            return; // no descriptor (spurious activation)
+        }
+        let settings = self.rd_ram_u32(info);
+        let src = self.rd_ram_u32(info.wrapping_add(4));
+        let dest = self.rd_ram_u32(info.wrapping_add(8));
+        let length = self.rd_ram_u16(info.wrapping_add(14));
+        if length == 0 {
+            return;
+        }
+        let mode = (settings >> 30) & 3;
+        if mode == 2 || mode == 3 {
+            return; // block/chain modes unmodeled (no consumer)
+        }
+        let size = match (settings >> 28) & 3 {
+            0 => 1u32,
+            1 => 2,
+            2 => 4,
+            _ => return,
+        };
+        let src_inc = (settings >> 26) & 3 == 2;
+        let dest_inc = (settings >> 18) & 3 == 2;
+        let irq_each = settings & (1 << 21) != 0;
+        // Resync repeat state when the driver rewrote the descriptor.
+        let mut ch = crate::system::dtc_get(irq).unwrap_or_default();
+        if ch.settings != settings || ch.dest != dest || ch.length != length {
+            ch = crate::system::DtcCh {
+                settings,
+                dest,
+                length,
+                base_src: src,
+                base_dest: dest,
+                remaining: length,
+                done: false,
+            };
+        }
+        if mode == 0 && ch.done {
+            crate::system::dtc_put(irq, ch);
+            return;
+        }
+        if ch.remaining == 0 {
+            ch.remaining = ch.length;
+        }
+        // One transfer unit src -> dest.
+        let mut buf = [0u8; 4];
+        for i in 0..size {
+            buf[i as usize] = self.read_ram_byte(src.wrapping_add(i));
+        }
+        if is_periph(dest) {
+            sys.p.write(sys, dest, size as u8, u32::from_le_bytes(buf));
+        } else {
+            for i in 0..size {
+                self.write_ram_byte(dest.wrapping_add(i), buf[i as usize]);
+            }
+        }
+        let nsrc = if src_inc { src.wrapping_add(size) } else { src };
+        let ndest = if dest_inc { dest.wrapping_add(size) } else { dest };
+        self.wr_ram_u32(info.wrapping_add(4), nsrc);
+        self.wr_ram_u32(info.wrapping_add(8), ndest);
+        ch.remaining -= 1;
+        // Completion: NORMAL stops (done), REPEAT wraps the repeat area
+        // and continues. IRQ on EACH transfer, or (END) at wrap/done.
+        let repeat_src = settings & (1 << 20) != 0; // 1 = source repeats
+        let wrapped = if ch.remaining == 0 {
+            if mode == 0 {
+                ch.done = true;
+            } else {
+                ch.remaining = ch.length;
+                if repeat_src {
+                    self.wr_ram_u32(info.wrapping_add(4), ch.base_src);
+                } else {
+                    self.wr_ram_u32(info.wrapping_add(8), ch.base_dest);
+                }
+            }
+            true
+        } else {
+            false
+        };
+        crate::system::dtc_put(irq, ch);
+        if irq_each || wrapped {
+            sys.p.nvic.borrow_mut().set_intr_pending(irq as i32);
+        }
+    }
+
+    fn service_sync_dma_inner(&mut self) {
+        if !crate::system::dma_active() {
+            return;
+        }
+        self.service_dtc();
         loop {
             let t = match crate::sys().take_memcopy_dma_transfer() {
                 Some(t) => t,
@@ -168,6 +291,7 @@ impl FlatMemory {
             }
             crate::sys().mark_dma_completed(t.stream_idx, true);
         }
+        crate::system::dma_idle();
     }
     /// Fetch one byte without any MPU check (execute permission belongs to
     /// the loop-top XN check). Unmapped bytes pend an execute-class bus
@@ -236,6 +360,9 @@ impl FlatMemory {
 }
 
 impl Memory for FlatMemory {
+    fn service_sync_dma(&mut self) {
+        self.service_sync_dma_inner();
+    }
     fn read8(&self, addr: u32) -> u8 {
         if is_periph(addr) {
             // MPU first: a faulting access must not reach model side

@@ -225,8 +225,24 @@ pub fn icu_raise_event(sys: &WasmSystem, event: u32) {
         return;
     }
     for (irq, slot) in IELSR_MIRROR.iter().enumerate() {
-        if slot.load(Ordering::Relaxed) == event {
-            sys.p.nvic.borrow_mut().set_intr_pending(irq as i32);
+        let w = slot.load(Ordering::Relaxed);
+        if w & 0x1FF == event {
+            if w & (1 << 24) != 0 {
+                // IELSR.DTCE (bit24, set by R_DTC_Enable) hands the event
+                // to the DTC engine; the transfer completes in the mem
+                // path. With TRANSFER_IRQ_END the source IRQ stays quiet
+                // until completion/wrap (the mode is known from the last
+                // serviced descriptor; unknown the first time = raise).
+                // IRQ_EACH and unstarted channels raise alongside.
+                dtc_activate(irq as u32);
+                let quiet = matches!(dtc_get(irq as u32),
+                    Some(ch) if ch.settings & (1 << 21) == 0 && !ch.done);
+                if !quiet {
+                    sys.p.nvic.borrow_mut().set_intr_pending(irq as i32);
+                }
+            } else {
+                sys.p.nvic.borrow_mut().set_intr_pending(irq as i32);
+            }
         }
     }
 }
@@ -619,8 +635,83 @@ pub fn spi_sd_exchange(base: u32, mosi: u8) -> Option<u8> {
     }
 }
 
-// ── Dataflash backing (8KB @ 0x40100000, erased 0xFF) ───────────────────────
-// Shared by the dataflash memory window and the FACI program/erase engine:
+/// Copy out one 512B virtual-SD block for host-side inspection (empty
+/// when out of range). Used by the demo block viewer.
+pub fn sd_read_block(block: u32) -> Vec<u8> {
+    sd_card().lock().unwrap().read_block(block as usize).unwrap_or_default()
+}
+
+/// Test-jig CAN error injection (the virtual wire never errors on its
+/// own): stuff `rx` receive / `tx` transmit errors into CAN0's
+/// counters (EWF/EPF/BOEF + ERI event per EIER, like a real storm).
+pub fn can_inject_errors(sys: &WasmSystem, rx: u16, tx: u16) {
+    for slot in sys.p.peripherals.iter() {
+        if slot.start != crate::peripherals::ra_can::CAN0_BASE {
+            continue;
+        }
+        let mut b = slot.peripheral.borrow_mut();
+        if let Some(u) = b.as_any_mut().downcast_mut::<crate::peripherals::ra_can::RaCan>() {
+            u.inject_errors(sys, rx, tx);
+            return;
+        }
+    }
+}
+
+
+// ── DTC engine (event-driven transfers, no CPU) ────────────────────────────
+// R_DTC_Open programs the SRAM vector table (DTCVBR + 4B per activation
+// IRQ holding the transfer_info_t pointer) and R_DTC_Enable arms the
+// source via IELSR.DTCE. Activations queue here; FlatMemory's sync-DMA
+// path (which owns RAM access) resolves descriptors fresh from SRAM on
+// every fire, so R_DTC_Reconfigure needs no modeling. Repeat state
+// lives here, keyed by activation IRQ.
+#[derive(Clone, Copy, Default)]
+pub struct DtcCh {
+    pub settings: u32,
+    pub dest: u32,
+    pub length: u16,
+    pub base_src: u32,
+    pub base_dest: u32,
+    pub remaining: u16,
+    pub done: bool,
+}
+static DTC_PENDING: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
+static DTC_CH: OnceLock<Mutex<std::collections::HashMap<u32, DtcCh>>> = OnceLock::new();
+
+fn dtc_pending() -> &'static Mutex<Vec<u32>> {
+    DTC_PENDING.get_or_init(|| Mutex::new(Vec::new()))
+}
+fn dtc_ch() -> &'static Mutex<std::collections::HashMap<u32, DtcCh>> {
+    DTC_CH.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+pub fn dtc_activate(irq: u32) {
+    dtc_pending().lock().unwrap().push(irq);
+    dma_kick();
+}
+// Set whenever a DMA/DTC transfer is staged or an activation queues;
+// the CPU run loop drains the sync paths while it is set (cheap atomic
+// poll every 16 instructions, no mutex traffic when idle).
+static DMA_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub fn dma_active() -> bool {
+    DMA_ACTIVE.load(Ordering::Relaxed)
+}
+pub fn dma_kick() {
+    DMA_ACTIVE.store(true, Ordering::Relaxed);
+}
+pub fn dma_idle() {
+    DMA_ACTIVE.store(false, Ordering::Relaxed);
+}
+pub fn dtc_take_pending() -> Option<u32> {
+    dtc_pending().lock().unwrap().pop()
+}
+pub fn dtc_get(irq: u32) -> Option<DtcCh> {
+    dtc_ch().lock().unwrap().get(&irq).copied()
+}
+pub fn dtc_put(irq: u32, ch: DtcCh) {
+    dtc_ch().lock().unwrap().insert(irq, ch);
+}
+
+// ── Dataflash backing (8KB @ 0x40100000, erased 0xFF) ───────────────────────// Shared by the dataflash memory window and the FACI program/erase engine:
 // the FSP R_FLASH_LP driver programs through FACI while Arduino reads hit
 // the memory-mapped window directly. Reset restores the erased state.
 pub const DATAFLASH_SIZE: usize = 8192;
@@ -832,6 +923,7 @@ impl WasmSystem {
 
     pub fn queue_dma_transfer(&self, t: DmaTransfer) {
         self.pending_dma.borrow_mut().push(t);
+        dma_kick();
     }
 
     pub fn pending_dma_count(&self) -> usize {
@@ -1025,6 +1117,8 @@ pub fn reset_globals() {
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CTSU_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SCI_SPI_LOOPBACK.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = DTC_PENDING.get() { m.lock().unwrap().clear(); }
+    if let Some(m) = DTC_CH.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SD_ARMED.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SD_CARD.get() { *m.lock().unwrap() = crate::peripherals::ra_spi::SpiSd::new(); }
     *dataflash().lock().unwrap() = [0xFF; 8192];

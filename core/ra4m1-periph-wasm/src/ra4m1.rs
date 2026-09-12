@@ -20,6 +20,7 @@ pub const ADC_BASE: u32 = 0x4005_C000;
 pub const DAC_BASE: u32 = 0x4005_E000;
 pub const RTC_BASE: u32 = 0x4004_4000;
 pub const DMAC_BASE: u32 = 0x4000_5000;
+pub const DTC_BASE: u32 = 0x4000_5400;
 pub const ELC_BASE: u32 = 0x4004_1000;
 pub const AGT0_BASE: u32 = 0x4008_4000;
 pub const CRC_BASE: u32 = 0x4007_4000;
@@ -1050,6 +1051,11 @@ mod tests {
         for i in 0..512u32 {
             assert_eq!(xfer(sys, 0xFF), (i.wrapping_mul(11).wrapping_add(5)) as u8 & 0xFF, "byte {}", i);
         }
+        // Host-side block export sees the written pattern too.
+        let blk1 = crate::system::sd_read_block(1);
+        assert_eq!(blk1.len(), 512);
+        assert!(blk1.iter().enumerate().all(|(i, &b)| b == (i.wrapping_mul(11).wrapping_add(5)) as u8));
+        assert_eq!(crate::system::sd_read_block(16).len(), 0, "OOB empty");
         crate::system::spi_set_sd_card(SPI1_BASE, false);
     }
 
@@ -1097,6 +1103,89 @@ mod tests {
         }
         crate::system::spi_set_sd_card(SPI1_BASE, false);
         assert!(toggled, "LED never lit: SD round-trip failed");
+    }
+
+    #[test]
+    fn ra4m1_map_can_errors() {
+        // CAN0 error counting: injected TX errors accumulate in TECR
+        // (RX in RECR), EWF latches at 96, EPF at 128 with the ERI event
+        // when enabled, TEC saturates at 255 with BOEF; EIFR clears by 0.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 9 * 4, 4, 74); // IELSR9 = CAN0_ERROR
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 9);     // ISER0: IRQ9
+        sys.p.write(sys, CAN0_BASE + 0x84C, 1, 0x0E); // EIER: EWIE+EPIE+BOEIE
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84E, 1) & 0xFF, 0, "RECR idle");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84F, 1) & 0xFF, 0, "TECR idle");
+        crate::system::can_inject_errors(sys, 10, 100);
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84E, 1) & 0xFF, 10, "RECR");
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84F, 1) & 0xFF, 100, "TECR");
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x84D, 1) & (1 << 1), 0, "EWF");
+        assert!(sys.p.nvic.borrow().has_pending(), "ERI pending");
+        crate::system::can_inject_errors(sys, 0, 40);
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84F, 1) & 0xFF, 140, "TECR2");
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x84D, 1) & (1 << 2), 0, "EPF");
+        sys.p.write(sys, CAN0_BASE + 0x84D, 1, 0x00); // W0C all
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84D, 1) & 0xFF, 0, "EIFR clear");
+        // Bus-off: TEC saturates at 255 with BOEF.
+        crate::system::can_inject_errors(sys, 0, 900);
+        assert_eq!(sys.p.read(sys, CAN0_BASE + 0x84F, 1) & 0xFF, 255, "TECR sat");
+        assert_ne!(sys.p.read(sys, CAN0_BASE + 0x84D, 1) & (1 << 3), 0, "BOEF");
+    }
+
+    #[test]
+    fn ra4m1_can_error_ok() {
+        // End-to-end CAN errors on the real Arduino_CAN stack: after
+        // begin, the test injects an error storm (TX error-passive);
+        // the FSP ERI path reports it and the sketch lights the LED on
+        // isError(). No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4canerr.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        // Let begin() finish programming EIER + routing ERI first.
+        for _ in 0..200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        }
+        let first = snap();
+        // One flag per episode: FSP reports raw EIFR bits as the event
+        // (ERR_WARNING=2, ERR_PASSIVE=4), and Arduino matches single
+        // values - like silicon, which crosses thresholds one at a time.
+        crate::system::can_inject_errors(sys, 0, 100);
+        let mut on = false;
+        for _ in 0..600 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                on = true;
+                break;
+            }
+        }
+        assert!(on, "LED never lit: CAN error never surfaced");
     }
 
     #[test]

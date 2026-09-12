@@ -569,6 +569,10 @@ impl Cpu {
         // Load handler PC through VTOR (model SCB, default 0x08000000).
         let vtor = sys.p.read(sys, 0xE000ED08, 4);
         let handler = mem.read32(vtor.wrapping_add(vector * 4));
+        if std::env::var("EXCLOG").is_ok() && handler == 0 {
+            eprintln!("EXCLOG zero-vector irq={} vector={} vtor={:08x} slot={:08x}",
+                irq, vector, vtor, vtor.wrapping_add(vector * 4));
+        }
         self.regs.r[15] = handler | 1;
         sys.p.dwt_count_exc(sys);
     }
@@ -1049,6 +1053,12 @@ impl Cpu {
             done += 1;
             if done & 15 == 0 {
                 crate::system::INSTRUCTION_COUNT.fetch_add(16u64, Ordering::Relaxed);
+                // Drain staged DMA/DTC transfers (atomic-guarded, free
+                // when idle): event-triggered engines like DTC complete
+                // here, not on peripheral ticks (which own no RAM).
+                if crate::system::dma_active() {
+                    mem.service_sync_dma();
+                }
             }
             // Keep the inactive... no — keep the CURRENT stack bank in sync
             // with r13 after every thread-mode instruction. PUSH/POP/ADD-SP

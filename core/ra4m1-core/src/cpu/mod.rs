@@ -1028,6 +1028,12 @@ impl Cpu {
             done += 1;
             if done & 15 == 0 {
                 crate::system::INSTRUCTION_COUNT.fetch_add(16u64, Ordering::Relaxed);
+                // Drain staged DMA/DTC transfers (atomic-guarded, free
+                // when idle): event-triggered engines like DTC complete
+                // here, not on peripheral ticks (which own no RAM).
+                if crate::system::dma_active() {
+                    mem.service_sync_dma();
+                }
             }
             // Keep the inactive... no — keep the CURRENT stack bank in sync
             // with r13 after every thread-mode instruction. PUSH/POP/ADD-SP
