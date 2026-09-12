@@ -7,7 +7,7 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 167) and `cargo build` green in the
+  `core/ra4m1-periph-wasm` (currently 182) and `cargo build` green in the
   top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -25,12 +25,12 @@ disk but is excluded from the workspace until its code is ready.
 - `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
   excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
   STM32 peripherals remain as reference until their RA replacements land.
-  157 tests must stay green (128 legacy CPU + 29 R4 proofs).
+  182 tests must stay green (128 legacy CPU + 54 R4 proofs).
 - `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
   CPU + ARM + RA peripherals, NO STM32 code, deps are only
   `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
   Release WASM is ~225KB vs ~2.1MB for the snapshot core (~9.4x smaller).
-  Its 25 `ra4m1.rs` proofs mirror the snapshot's register-level ones and must stay green.
+  Its 46 `ra4m1.rs` proofs mirror the snapshot's register-level ones and must stay green.
 - `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
   `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
   No STM32 and no ESP32 code may ever link here.
@@ -44,9 +44,9 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# snapshot core (157 tests, always single-threaded)
+# snapshot core (182 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# small core (25 R4 proofs)
+# small core (46 R4 proofs)
 cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
@@ -69,16 +69,18 @@ wasm wrappers can path-depend on it).
 | WDT/IWDT | `0x4004_4200`/`0x4004_4400` | `ra_misc.rs` + shared reset flags |
 | DMAC/DTC | `0x4000_5000`/`0x4000_5400` | `ra_dma.rs` queues shared sync-memcopy path |
 | DOC/ADC/DAC | `0x4005_4100`/`0x4005_C000`/`0x4005_E000` | `ra_misc.rs`/`ra_analog.rs` |
-| SCI0-3 | `0x4007_0000`+ch*`0x20` | `ra_sci.rs` byte-exact UART + simple-SPI mode (SMR.CM/SPMR, loopback jig) |
-| SPI0/1 | `0x4007_2000`/`0x4007_2100` | `ra_spi.rs` RSPI master, polled SPRF + loopback (Arduino D11-13 probe to ch1) |
-| IIC0/1 | `0x4005_3000`/`0x4005_3100` | `ra_i2c.rs` RIIC master + virtual EEPROM slave at 0x50 |
+| SCI0-9 | `0x4007_0000`+ch*`0x20` | `ra_sci.rs` byte-exact UART + simple-SPI mode (SMR.CM/SPMR, loopback jig; ch4-9 eventless polled) |
+| SPI0/1 | `0x4007_2000`/`0x4007_2100` | `ra_spi.rs` RSPI master (polled SPRF + loopback, Arduino D11-13 probe to ch1) + slave (MSTR=0 staging + exchange) + virtual SD card |
+| IIC0-2 | `0x4005_3000`+ch*`0x100` | `ra_i2c.rs` RIIC master + virtual EEPROM slave at 0x50 + shared-bus slave (SAR/AAS/RXI/TXI/STOP; IIC2 eventless) |
 | CRC | `0x4007_4000` | `ra_misc.rs` IEEE-802.3 |
-| GPT0-7 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven (0-1: 32-bit) |
-| AGT0-1 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` 16-bit count |
+| GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven (0-1: 32-bit; 8-13 eventless polled) |
+| AGT0-5 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` 16-bit count (2-5 eventless polled) |
 | ACMPLP/OPAMP | `0x4008_5E00`/`0x4008_6000` | `ra_opamp.rs` loopback + compare |
-| USBFS | `0x4009_0000` | `ra_usb.rs` endpoint FIFOs + TX capture + IRQs |
-| CTSU | `0x4008_1000` | `ra_ctsu.rs` STRT->tick counters + END event |
-| CAN0 | `0x4005_0000` | `ra_can.rs` mailbox TX/RX + self-test loopback (CAN1: no routable events, unmapped) |
+| USBFS | `0x4009_0000` | `ra_usb.rs` endpoint FIFOs + TX capture + IRQs (CDC + HID, suspend/resume) |
+| CTSU | `0x4008_1000` | `ra_ctsu.rs` STRT->tick counters + END event (self + mutual MD=2) |
+| CAN0 | `0x4005_0000` | `ra_can.rs` mailbox TX/RX + self-test loopback + RX/TX FIFO via MB24 (CAN1: no routable events, unmapped) |
+| DATAFLASH | `0x4010_0000` | `ra_flash.rs` 8KB window, erased `0xFF`, bit-clear writes |
+| FACI_LP | `0x407E_C000` | `ra_flash.rs` program/erase/blankcheck engine + FENTRYR |
 | ARM | `0xE000_xxxx` | reuse NVIC/SysTick/SCB/MPU/FPU/DWT/STIR/ITM |
 
 `Peripherals::new_ra4m1()` builds this map. `WasmSystem::new_ra4m1()` +
@@ -123,7 +125,15 @@ wasm wrappers can path-depend on it).
   TSRC strobe), RTC alarm (event 38) + RTC lib firmware proof (BCD minute
   rollover), WDT lib proofs (refresh holds 5000 chunks, expiry latches;
   FSP uses TOPS=3 = 4096 ticks), OPAMP lib firmware proof (`OPAMP.begin()`
-  -> AMPMON0).
+  -> AMPMON0), dataflash + FACI_LP (FSP R_FLASH_LP program/erase/
+  blankcheck, Arduino EEPROM round-trip), I2C slave (shared-bus fabric
+  vs master channels, AAS/RXI/TXI/STOP, Wire-master/bare-slave proof),
+  SPI slave (MSTR=0 staging + exchange, dual-channel proof), CAN FIFO
+  (RX/TX depth-4, MB24 port, RFPCR/TFPCR, loopback proof), CTSU mutual
+  (MD=2 pair default + overrides), USB HID keyboard (PluggableUSB report
+  descriptor + INT-IN report proof), USB suspend/resume (DVSQ SUSPx,
+  RESM, WKUP, callback proof), virtual SD in SPI mode (CMD0/8/55/41/58/
+  17/24, MBR + write/read-back proof).
 - Hard-won truths: RA4M1 bases differ from RA6 everywhere (this §3 is from
   R7FA4M1AB.h, never assume); SYSC OPCCR resets 0x00 with timed TSF;
   AGT reload latches the programmed counter (AGTCMA untouched when output
@@ -146,9 +156,8 @@ wasm wrappers can path-depend on it).
   completion event (no STOP by design - tolerated, real sketches ignore
   its return too); RSPI D11-13 probe to SPI1 (0x40072100), polled SPRF,
   SPDR byte lane is +0x04.
-- NEXT: new models (EEPROM/dataflash, slave modes, CAN FIFO, CTSU mutual,
-  USB HID, virtual SD), demo Wire/SPI tabs. LED matrix (WiFi board)
-  renders from RA GPIO pins, not as a peripheral.
+- NEXT: demo Wire/SPI/SD tabs, WiFi un-park assessment. LED matrix
+  (WiFi board) renders from RA GPIO pins, not as a peripheral.
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
 
@@ -171,7 +180,13 @@ wasm wrappers can path-depend on it).
 `ra4m1_spi_ok`, `ra4m1_can_ok`, `ra4m1_map_icu_pin_irq`,
 `ra4m1_attach_interrupt`, `ra4m1_serial1_echo`,
 `ra4m1_map_extra_channels`, `ra4m1_rtc_firmware`, `ra4m1_map_rtc_alarm`,
-`ra4m1_wdt_refresh`, `ra4m1_wdt_expire`, `ra4m1_opamp_firmware`.
+`ra4m1_wdt_refresh`, `ra4m1_wdt_expire`, `ra4m1_opamp_firmware`,
+`ra4m1_map_dataflash_program_erase`, `ra4m1_eeprom_ok`,
+`ra4m1_map_i2c_slave`, `ra4m1_wire_slave_ok`, `ra4m1_map_spi_slave`,
+`ra4m1_spi_slave_ok`, `ra4m1_map_can_fifo`, `ra4m1_can_fifo_ok`,
+`ra4m1_map_ctsu_mutual`, `ra4m1_ctsu_mutual_ok`,
+`ra4m1_map_usb_suspend_resume`, `ra4m1_usb_hid_keyboard`,
+`ra4m1_usb_suspend_resume_ok`, `ra4m1_map_sd_card`, `ra4m1_sd_ok`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
 
@@ -188,9 +203,15 @@ at zero executes shifted garbage (looks plausible, faults in an epilogue).
 `core/blinky/r4blink.bin` is the vendored Blink build the boot test runs
 (500k instructions, no fault, PC in app region). `core/blinky/r4serial.bin`
 (Serial hello), `core/blinky/r4echo.bin` (bulk echo),
-`core/blinky/r4wire.bin` (Wire EEPROM round-trip) and
-`core/blinky/r4spi.bin` (SPI loopback) are the vendored USB/I2C/SPI
-proof builds, compiled the same way from their sketches.
+`core/blinky/r4wire.bin` (Wire EEPROM round-trip),
+`core/blinky/r4spi.bin` (SPI loopback), `core/blinky/r4eep.bin`
+(EEPROM), `core/blinky/r4wire1.bin` (Wire master + bare slave),
+`core/blinky/r4spislv.bin` (SPI0 master + SPI1 slave),
+`core/blinky/r4canfifo.bin` (CAN FIFO), `core/blinky/r4ctsu.bin`
+(CTSU mutual), `core/blinky/r4hid.bin` (HID keyboard),
+`core/blinky/r4susp.bin` (suspend/resume) and
+`core/blinky/r4sd.bin` (SD card) are the vendored USB/I2C/SPI/CAN/
+touch/HID/SD proof builds, compiled the same way from their sketches.
 
 ## 8. Browser demo (`demo/`)
 
