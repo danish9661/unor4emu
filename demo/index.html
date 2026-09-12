@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230e7490'/%3E%3Ctext x='32' y='42' font-family='monospace' font-size='28' font-weight='bold' text-anchor='middle' fill='white'%3ER4%3C/text%3E%3C/svg%3E">
 <title>UNO R4 Minima — In-Browser Emulator</title>
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -19,7 +20,7 @@
   <div class="badges">
     <span class="badge">R7FA4M1AB3CFM</span>
     <span class="badge">Cortex-M4F @ 48MHz</span>
-    <span class="badge ok">157 proofs green</span>
+    <span class="badge ok">184 proofs green</span>
     <span class="badge" id="wasm-size">228 KB wasm</span>
   </div>
 </header>
@@ -77,6 +78,11 @@
       <button class="tab active" data-tab="blink" role="tab">Blink</button>
       <button class="tab" data-tab="serial" role="tab">Serial</button>
       <button class="tab" data-tab="echo" role="tab">Echo</button>
+      <button class="tab" data-tab="wire" role="tab">Wire</button>
+      <button class="tab" data-tab="spi" role="tab">SPI</button>
+      <button class="tab" data-tab="sd" role="tab">SD</button>
+      <button class="tab" data-tab="can" role="tab">CAN</button>
+      <button class="tab" data-tab="eep" role="tab">EEPROM</button>
     </div>
 
     <div class="tabpane active" id="pane-blink">
@@ -111,12 +117,57 @@
       <div id="echo-log" class="term small"></div>
     </div>
 
+    <div class="tabpane" id="pane-wire">
+      <p class="desc">Wire master (IIC1) vs a bare-metal slave (IIC0 @ <span class="mono">0x42</span>): the master writes <span class="mono">0xBE</span>, the slave replies <span class="mono">0xEF</span>. Flags below are live MMIO — data registers are never touched (reading one would eat the firmware's byte).</p>
+      <div class="row">
+        <button id="btn-wire-run" class="btn-acc">Run Wire demo</button>
+      </div>
+      <ol id="wire-steps" class="enum"></ol>
+      <div id="wire-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-spi">
+      <p class="desc">SPI0 master vs SPI1 slave on one chip: the slave stages <span class="mono">0x5A</span>, the master shifts <span class="mono">0xA5</span> — both bytes cross in one exchange. Status below is live MMIO.</p>
+      <div class="row">
+        <button id="btn-spi-run" class="btn-acc">Run SPI demo</button>
+      </div>
+      <ol id="spi-steps" class="enum"></ol>
+      <div id="spi-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-sd">
+      <p class="desc">Virtual SD card in SPI mode: Arduino SPI runs the real init (CMD0/CMD8/ACMD41), reads block 0 (MBR signature), writes a pattern to block 1 and reads it back. The dump below is read straight off the virtual card afterwards.</p>
+      <div class="row">
+        <button id="btn-sd-run" class="btn-acc">Run SD demo</button>
+      </div>
+      <ol id="sd-steps" class="enum"></ol>
+      <div id="sd-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-can">
+      <p class="desc">CAN0 self-test loopback into the RX FIFO: mailbox 0 transmits (SID <span class="mono">0x123</span>), the frame lands in the FIFO and is read back through the MB24 port. FIFO reads below never pop — only the firmware's RFPCR write does.</p>
+      <div class="row">
+        <button id="btn-can-run" class="btn-acc">Run CAN demo</button>
+      </div>
+      <ol id="can-steps" class="enum"></ol>
+      <div id="can-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-eep">
+      <p class="desc">Arduino EEPROM library on the dataflash window: two bytes go through the real FSP erase/program path and are read back from <span class="mono">0x40100000</span> itself. The bytes below are live dataflash reads.</p>
+      <div class="row">
+        <button id="btn-eep-run" class="btn-acc">Run EEPROM demo</button>
+      </div>
+      <ol id="eep-steps" class="enum"></ol>
+      <div id="eep-verdict" class="term small"></div>
+    </div>
+
     <div id="banner" class="banner hidden"></div>
   </section>
 </main>
 
 <footer>
-  <span>RA4M1 peripheral models proven against arduino-cli firmware (157 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (184 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
 </footer>
 
 <script type="module" src="app.js"></script>

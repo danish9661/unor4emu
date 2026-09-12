@@ -91,7 +91,7 @@ h1 span { color: var(--teal); font-weight: 600; }
 .pin { aspect-ratio: 1; border-radius: 50%; background: #1a2530; border: 1px solid #243140; transition: all .12s; }
 .pin.hi { background: var(--amber); border-color: #ffd88a; box-shadow: 0 0 8px #ffb02e88; }
 .pin.chg { outline: 1px solid var(--teal); }
-.tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
 .tab {
   flex: 1; padding: 9px; border-radius: 10px; border: 1px solid var(--line);
   background: transparent; color: var(--dim); font-weight: 700; cursor: pointer;

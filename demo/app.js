@@ -3,6 +3,7 @@ import init, {
   periph_read as _pr, periph_write as _pw,
   usb_take_tx, usb_rx_inject,
   usb_host_attach, usb_host_reset, usb_host_setup, usb_host_status_done,
+  spi_set_sd_card, sd_read_block,
 } from './pkg/uno_r4_minima_wasm.js';
 
 const APP_BASE = 0x4000;
@@ -141,8 +142,9 @@ function refreshBoard(txFlash, rxFlash) {
     }
     if (v) led = true;
   }
-  // D13 is the Minima LED; fall back to any-output glow.
-  const d13 = (periphRead(PORT_BASE + 1 * 0x20, 4) >> 13) & 1;
+  // D13 is the Minima LED = P111 (PORT1 bit 11); fall back to
+  // any-output glow (e.g. TX/RX activity elsewhere).
+  const d13 = (periphRead(PORT_BASE + 1 * 0x20, 4) >> 11) & 1;
   setLed('led-main', 'led-glow', d13 || led);
   if (txFlash) flash('led-tx');
   if (rxFlash) flash('led-rx');
@@ -361,6 +363,192 @@ $('btn-echo-send').addEventListener('click', async () => {
   const s = new TextDecoder().decode(new Uint8Array(back.slice(0, text.length)));
   say('< ' + s, s === text ? 'okline' : '');
   if (s !== text) say(`(mismatch: wanted ${text.length}B, got ${back.length}B)`);
+});
+
+/* ---------------- wire / spi / sd ---------------- */
+// Phase checklist: sticky MMIO-polled milestones (data registers are
+// never read - reading ICDRR/SPDR would eat the firmware's byte).
+function mkSteps(ul, labels) {
+  ul.innerHTML = '';
+  const items = labels.map((l) => {
+    const li = document.createElement('li');
+    li.textContent = l;
+    ul.appendChild(li);
+    return li;
+  });
+  const done = new Array(labels.length).fill(false);
+  return {
+    mark(i) { if (!done[i]) { done[i] = true; items[i].className = 'done'; } },
+    get done() { return done; },
+  };
+}
+function sayVerdict(el, lines) {
+  el.innerHTML = '';
+  for (const [s, c] of lines) {
+    const sp = document.createElement('span');
+    if (c) sp.className = c;
+    sp.textContent = s + '\n';
+    el.appendChild(sp);
+  }
+}
+const ledOn = () => ((periphRead(PORT_BASE + 1 * 0x20, 4) >> 11) & 1) !== 0; // D13 = P111
+// Boot fw, then pump `chunks` 48k-chunks (proof-harness cadence),
+// calling perChunk() after every chunk for transient flags.
+async function runFw(fwName, arm, chunks, perChunk) {
+  blinkMode = false;
+  const fw = await fetch('fw/' + fwName).then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+  boot(fw);
+  running = true; setState('running');
+  if (arm) arm();
+  await pump(6000000);
+  for (let i = 0; i < chunks && running; i++) {
+    if (!pump(CHUNK)) return false;
+    if (perChunk) perChunk();
+    if (i % 8 === 7) { refreshBoard(false, false); await new Promise((r) => requestAnimationFrame(r)); }
+  }
+  refreshBoard(false, false);
+  return running;
+}
+
+$('btn-wire-run').addEventListener('click', async () => {
+  const IIC0 = 0x40053000, IIC1 = 0x40053100;
+  const st = mkSteps($('wire-steps'), [
+    'master START (IIC1 BBSY)',
+    'slave addressed (IIC0 AAS0 @ 0x42)',
+    'slave received byte (IIC0 RDRF)',
+    'master reading reply (IIC1 RDRF)',
+    'STOP seen on the bus',
+    'LED on — 0xBE out, 0xEF back',
+  ]);
+  sayVerdict($('wire-verdict'), [['booting Wire master + slave…', 'sys']]);
+  let led = false;
+  const ok = await runFw('r4wire1.bin', null, 3000, () => {
+    if ((periphRead(IIC1 + 0x01, 1) & 0x80) !== 0) st.mark(0);
+    if ((periphRead(IIC0 + 0x08, 1) & 1) !== 0) st.mark(1);
+    if ((periphRead(IIC0 + 0x09, 1) & 0x20) !== 0) st.mark(2);
+    if ((periphRead(IIC1 + 0x09, 1) & 0x20) !== 0) st.mark(3);
+    if (((periphRead(IIC1 + 0x09, 1) & 8) !== 0) || ((periphRead(IIC0 + 0x09, 1) & 8) !== 0)) st.mark(4);
+    // The LED implies every prior step (firmware checked the data).
+    if (ledOn()) { for (let i = 0; i < 6; i++) st.mark(i); led = true; }
+  });
+  running = false; setState('paused');
+  sayVerdict($('wire-verdict'), ok && led
+    ? [['round-trip complete: slave got 0xBE, master got 0xEF', 'okline']]
+    : [['no LED — the round-trip did not complete (see console).', '']]);
+  if (!ok || !led) banner('Wire demo did not complete.', 'err');
+});
+
+$('btn-spi-run').addEventListener('click', async () => {
+  const SPI0 = 0x40072000, SPI1 = 0x40072100;
+  const st = mkSteps($('spi-steps'), [
+    'SPI1 slave configured (SPE, MSTR=0)',
+    'SPI0 master configured (MSTR+SPE)',
+    'master shifted (SPI0 SPRF)',
+    'slave received (SPI1 SPRF)',
+    'LED on — 0xA5 / 0x5A both crossed',
+  ]);
+  sayVerdict($('spi-verdict'), [['booting SPI0 master + SPI1 slave…', 'sys']]);
+  let led = false;
+  const ok = await runFw('r4spislv.bin', null, 3000, () => {
+    const c1 = periphRead(SPI1, 1);
+    if ((c1 & 0x48) === 0x40) st.mark(0);
+    if ((periphRead(SPI0, 1) & 0x48) === 0x48) st.mark(1);
+    if ((periphRead(SPI0 + 0x03, 1) & 0x80) !== 0) st.mark(2);
+    if ((periphRead(SPI1 + 0x03, 1) & 0x80) !== 0) st.mark(3);
+    // The LED implies the exchange (firmware checked both bytes).
+    if (ledOn()) { for (let i = 0; i < 5; i++) st.mark(i); led = true; }
+  });
+  running = false; setState('paused');
+  sayVerdict($('spi-verdict'), ok && led
+    ? [['exchange complete: master saw 0x5A, slave saw 0xA5', 'okline']]
+    : [['no LED — the exchange did not complete (see console).', '']]);
+  if (!ok || !led) banner('SPI demo did not complete.', 'err');
+});
+
+$('btn-sd-run').addEventListener('click', async () => {  const SPI1 = 0x40072100;
+  const st = mkSteps($('sd-steps'), [
+    'card initialized (CMD0/CMD8/ACMD41)',
+    'block 0 read — MBR signature 55 AA',
+    'block 1 write landed (seen on the card)',
+    'LED on — firmware verified read-back',
+  ]);
+  sayVerdict($('sd-verdict'), [['booting SD sketch, arming virtual card…', 'sys']]);
+  let led = false, wrote = false;
+  const ok = await runFw('r4sd.bin', () => spi_set_sd_card(SPI1, true), 1500, () => {
+    // Phase milestones off card state, not firmware internals: the
+    // write lands last, so it implies init + MBR read already passed.
+    const b1 = sd_read_block(1);
+    if (b1.length === 512 && b1[0] === 5) { st.mark(0); st.mark(1); st.mark(2); wrote = true; }
+    if (ledOn()) { for (let i = 0; i < 4; i++) st.mark(i); led = true; }
+  });
+  spi_set_sd_card(SPI1, false);
+  running = false; setState('paused');
+  if (ok && led) {
+    st.mark(0); st.mark(1); st.mark(2); st.mark(3);
+    const b0 = sd_read_block(0), b1 = sd_read_block(1);
+    const hex = (a, n) => [...a.slice(0, n)].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+    const tail = [...b0.slice(508)].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+    const pat = b1.length === 512 && b1.every((b, i) => b === ((i * 11 + 5) & 0xFF));
+    sayVerdict($('sd-verdict'), [
+      [`block 0 [0..32): ${hex(b0, 32)}`, 'sys'],
+      [`block 0 [508..512): ${tail}  (55 AA = MBR signature)`, 'sys'],
+      [`block 1 pattern re-checked here: ${pat ? 'all 512 bytes match' : 'MISMATCH'}`, pat ? 'okline' : ''],
+    ]);
+  } else {
+    sayVerdict($('sd-verdict'), [['no LED — the SD flow did not complete (see console).', '']]);
+    banner('SD demo did not complete.', 'err');
+  }
+});
+
+$('btn-can-run').addEventListener('click', async () => {
+  const CAN0 = 0x40050000;
+  const st = mkSteps($('can-steps'), [
+    'RX FIFO enabled (RFE)',
+    'frame queued (RFUST>0)',
+    'MB24 shows SID 0x123',
+    'payload bytes ca fe',
+    'LED on — loopback round-trip',
+  ]);
+  sayVerdict($('can-verdict'), [['booting CAN self-test + FIFO sketch…', 'sys']]);
+  let led = false;
+  const ok = await runFw('r4canfifo.bin', null, 3000, () => {
+    const rfcr = periphRead(CAN0 + 0x848, 1);
+    if ((rfcr & 1) !== 0) st.mark(0);
+    if ((rfcr & 0x0E) !== 0) {
+      st.mark(1);
+      if (periphRead(CAN0 + 0x380, 4) === (0x123 << 18)) st.mark(2);
+      if (periphRead(CAN0 + 0x386, 1) % 256 === 0xCA && periphRead(CAN0 + 0x387, 1) % 256 === 0xFE) st.mark(3);
+    }
+    // The LED implies the firmware saw the frame (it checks ID + data).
+    if (ledOn()) { for (let i = 0; i < 5; i++) st.mark(i); led = true; }
+  });
+  running = false; setState('paused');
+  sayVerdict($('can-verdict'), ok && led
+    ? [['loopback complete: MB0 → RX FIFO → MB24, payload intact', 'okline']]
+    : [['no LED — the CAN flow did not complete (see console).', '']]);
+  if (!ok || !led) banner('CAN demo did not complete.', 'err');
+});
+
+$('btn-eep-run').addEventListener('click', async () => {
+  const DF = 0x40100000;
+  const st = mkSteps($('eep-steps'), [
+    'byte 0 programmed (a5)',
+    'byte 1 programmed (3c)',
+    'LED on — flash read-back matched',
+  ]);
+  sayVerdict($('eep-verdict'), [['booting Arduino EEPROM sketch…', 'sys']]);
+  let led = false;
+  const ok = await runFw('r4eep.bin', null, 3000, () => {
+    // Plain dataflash window reads: no side effects, always safe.
+    if (periphRead(DF, 1) % 256 === 0xA5) st.mark(0);
+    if (periphRead(DF + 1, 1) % 256 === 0x3C) { st.mark(1); }
+    if (ledOn()) { for (let i = 0; i < 3; i++) st.mark(i); led = true; }
+  });
+  running = false; setState('paused');
+  sayVerdict($('eep-verdict'), ok && led
+    ? [['round-trip complete: EEPROM.write → FACI → 0x40100000 reads a5 3c', 'okline']]
+    : [['no LED — the EEPROM flow did not complete (see console).', '']]);
+  if (!ok || !led) banner('EEPROM demo did not complete.', 'err');
 });
 
 /* ---------------- boot ---------------- */

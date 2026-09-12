@@ -1,0 +1,73 @@
+# Deploy the UNO R4 Minima browser demo to GitHub Pages.
+# The demo is fully static (index.html + release WASM + vendored firmware);
+# this workflow rebuilds demo/pkg + demo/fw from source on every push to
+# master (they are git-ignored build outputs) and publishes demo/.
+name: Deploy demo to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'demo/**'
+      - 'wasm-minima/**'
+      - 'core/ra4m1-core/**'
+      - 'crates/wifi-link/**'
+      - 'core/blinky/r4*.bin'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen-cli (matches Cargo.lock 0.2.128)
+        run: |
+          curl -sSL -o /tmp/wasm-bindgen.tar.gz \
+            https://github.com/rustwasm/wasm-bindgen/releases/download/0.2.128/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/wasm-bindgen.tar.gz -C /tmp
+          echo /tmp/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl >> "$GITHUB_PATH"
+
+      - name: Build demo (release WASM + JS glue + firmware)
+        run: ./demo/build.sh
+
+      - name: Smoke-check demo outputs
+        run: |
+          test -f demo/index.html
+          test -f demo/pkg/uno_r4_minima_wasm_bg.wasm
+          test -f demo/pkg/uno_r4_minima_wasm.js
+          for f in r4blink.bin r4serial.bin r4echo.bin r4wire1.bin r4spislv.bin r4sd.bin r4canfifo.bin r4eep.bin; do
+            test -f demo/fw/$f || (echo "missing demo/fw/$f" && exit 1)
+          done
+          ls -la demo/pkg demo/fw
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: demo/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

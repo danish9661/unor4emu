@@ -13,5 +13,7 @@ mkdir -p demo/pkg demo/fw
   target/wasm32-unknown-unknown/release/uno_r4_minima_wasm.wasm \
   --out-dir demo/pkg --target web
 cp core/blinky/r4blink.bin core/blinky/r4serial.bin core/blinky/r4echo.bin \
-   core/blinky/r4wire.bin core/blinky/r4spi.bin demo/fw/
+   core/blinky/r4wire.bin core/blinky/r4spi.bin core/blinky/r4wire1.bin \
+   core/blinky/r4spislv.bin core/blinky/r4sd.bin core/blinky/r4canfifo.bin \
+   core/blinky/r4eep.bin demo/fw/
 ls -la demo/pkg demo/fw | head -n 20
