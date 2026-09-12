@@ -512,6 +512,17 @@ pub fn sci_spi_loopback(base: u32) -> bool {
     sci_spi_loopback_set().lock().unwrap().contains(&base)
 }
 
+// ── Dataflash backing (8KB @ 0x40100000, erased 0xFF) ───────────────────────
+// Shared by the dataflash memory window and the FACI program/erase engine:
+// the FSP R_FLASH_LP driver programs through FACI while Arduino reads hit
+// the memory-mapped window directly. Reset restores the erased state.
+pub const DATAFLASH_SIZE: usize = 8192;
+static DATAFLASH: OnceLock<Mutex<[u8; 8192]>> = OnceLock::new();
+
+pub fn dataflash() -> &'static Mutex<[u8; 8192]> {
+    DATAFLASH.get_or_init(|| Mutex::new([0xFF; 8192]))
+}
+
 // ── SPI bus taps (JS hardware layer plumbing) ──────────────────────────────
 // Event word layout: bit 31 = CS edge event, bit 30 = asserted (1) when CS
 // is a CS event, bit 29 = DC level (1 = data) when the tap has a DC pin,
@@ -907,6 +918,7 @@ pub fn reset_globals() {
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CTSU_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SCI_SPI_LOOPBACK.get() { m.lock().unwrap().clear(); }
+    *dataflash().lock().unwrap() = [0xFF; 8192];
     if let Some(m) = CAN_STAGED.get() { m.lock().unwrap().clear(); }
     if let Some(m) = AUDIO_SOURCE.get() { *m.lock().unwrap() = None; }
     if let Some(m) = AUDIO_CAPTURE.get() { m.lock().unwrap().clear(); }

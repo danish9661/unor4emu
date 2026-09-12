@@ -52,6 +52,7 @@ pub mod ra_can;
 pub mod ra_i2c;
 pub mod ra_spi;
 pub mod ra_icu;
+pub mod ra_flash;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -673,6 +674,10 @@ impl Peripherals {
         // RA SPI0/SPI1 (RSPI; Arduino SPI is polled, loopback jig shared)
         if let Some(x) = ra_spi::RaSpi::new_spi(0) { add(0x4007_2000, 0x4007_2100, x); }
         if let Some(x) = ra_spi::RaSpi::new_spi(1) { add(0x4007_2100, 0x4007_2200, x); }
+        // RA dataflash window (erased 0xFF, bit-clear writes) + FACI_LP
+        // command engine (Arduino EEPROM library via R_FLASH_LP)
+        if let Some(x) = ra_flash::RaDataFlash::new() { add(0x4010_0000, 0x4010_2000, x); }
+        if let Some(x) = ra_flash::RaFaci::new() { add(0x407E_C000, 0x407F_0000, x); }
         p.finish_registration();
         p
     }

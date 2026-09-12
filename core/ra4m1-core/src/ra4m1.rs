@@ -32,6 +32,8 @@ pub const IIC0_BASE: u32 = 0x4005_3000;
 pub const SPI0_BASE: u32 = 0x4007_2000;
 pub const SPI1_BASE: u32 = 0x4007_2100;
 pub const USBFS_BASE: u32 = 0x4009_0000;
+pub const DATAFLASH_BASE: u32 = 0x4010_0000;
+pub const FACI_BASE: u32 = 0x407E_C000;
 
 /// Make a FlatMemory wired for RA4M1 (flash at zero).
 pub fn ra4m1_memory() -> crate::cpu::mem::FlatMemory {
@@ -371,6 +373,88 @@ mod tests {
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 1);
         sys.p.write(sys, ACMPLP_BASE + 0x10, 4, 0x100);
         assert_eq!(sys.p.read(sys, ACMPLP_BASE + 0x04, 4) & 1, 0);
+    }
+
+    #[test]
+    fn ra4m1_map_dataflash_program_erase() {
+        // Dataflash + FACI in the exact FSP R_FLASH_LP register sequence:
+        // program sticks, direct writes clear bits only, erase restores
+        // 0xFF, blankcheck reports BCERR0 truthfully, FRDY handshakes busy.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *crate::system::dataflash().lock().unwrap() = [0xFF; 8192];
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        assert_eq!(sys.p.read(sys, FACI_BASE + 0x12C, 4) & (1 << 6), 0, "idle");
+        sys.p.write(sys, FACI_BASE + 0x108, 2, 0x0000); // FSARL
+        sys.p.write(sys, FACI_BASE + 0x110, 2, 0xFE00); // FSARH
+        sys.p.write(sys, FACI_BASE + 0x100, 1, 0x10);   // P/E enter
+        sys.p.write(sys, FACI_BASE + 0x130, 4, 0xA5);   // FWBL0
+        sys.p.write(sys, FACI_BASE + 0x114, 1, 0x81);   // program
+        assert!(sys.p.read(sys, FACI_BASE + 0x12C, 4) & (1 << 6) != 0, "FRDY busy");
+        sys.p.write(sys, FACI_BASE + 0x114, 1, 0x00);   // OPST clear
+        assert_eq!(sys.p.read(sys, FACI_BASE + 0x12C, 4) & (1 << 6), 0, "FRDY idle");
+        assert_eq!(sys.p.read(sys, DATAFLASH_BASE, 1) & 0xFF, 0xA5);
+        sys.p.write(sys, FACI_BASE + 0x100, 1, 0x10);
+        sys.p.write(sys, FACI_BASE + 0x130, 4, 0x0F);
+        sys.p.write(sys, FACI_BASE + 0x114, 1, 0x81);
+        assert_eq!(sys.p.read(sys, DATAFLASH_BASE, 1) & 0xFF, 0x05);
+        sys.p.write(sys, FACI_BASE + 0x100, 1, 0x10);
+        sys.p.write(sys, FACI_BASE + 0x118, 2, 0);
+        sys.p.write(sys, FACI_BASE + 0x114, 1, 0x83);
+        assert!(sys.p.read(sys, FACI_BASE + 0x128, 4) & (1 << 3) != 0, "BCERR0");
+        sys.p.write(sys, FACI_BASE + 0x100, 1, 0x10);
+        sys.p.write(sys, FACI_BASE + 0x114, 1, 0x84);
+        assert_eq!(sys.p.read(sys, DATAFLASH_BASE, 1) & 0xFF, 0xFF);
+        assert_eq!(sys.p.read(sys, DATAFLASH_BASE + 0x3FF, 1) & 0xFF, 0xFF);
+        sys.p.write(sys, DATAFLASH_BASE + 0x10, 1, 0xF0);
+        assert_eq!(sys.p.read(sys, DATAFLASH_BASE + 0x10, 1) & 0xFF, 0xF0);
+        sys.p.write(sys, DATAFLASH_BASE + 0x10, 1, 0xFF);
+        assert_eq!(sys.p.read(sys, DATAFLASH_BASE + 0x10, 1) & 0xFF, 0xF0);
+    }
+
+    #[test]
+    fn ra4m1_eeprom_ok() {
+        // End-to-end EEPROM on the real Arduino library: the sketch writes
+        // two bytes via EEPROM.write (FSP R_FLASH_LP erase + program) and
+        // lights the LED once millis() passes and the bytes read back from
+        // the dataflash window itself. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *crate::system::dataflash().lock().unwrap() = [0xFF; 8192];
+        let bin = include_bytes!("../../blinky/r4eep.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "LED never lit: EEPROM round-trip failed");
     }
 
     #[test]
