@@ -29,6 +29,7 @@ pub const ACMPLP_BASE: u32 = 0x4008_5E00;
 pub const CTSU_BASE: u32 = 0x4008_1000;
 pub const CAN0_BASE: u32 = 0x4005_0000;
 pub const IIC0_BASE: u32 = 0x4005_3000;
+pub const IIC1_BASE: u32 = 0x4005_3100;
 pub const SPI0_BASE: u32 = 0x4007_2000;
 pub const SPI1_BASE: u32 = 0x4007_2100;
 pub const USBFS_BASE: u32 = 0x4009_0000;
@@ -630,6 +631,173 @@ mod tests {
         assert_eq!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & (1 << 4), 0, "NACKF clear");
         sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x68); // SP
         sys.tick();
+    }
+
+    #[test]
+    fn ra4m1_map_i2c_slave() {
+        // IIC0 master <-> IIC1 slave across the shared bus fabric: an
+        // FSP blocking-master shape on IIC0, polled slave registers on
+        // IIC1. Address match latches AAS (no NACK), data routes both
+        // ways, a wrong address NACKs with the slave untouched, STOP
+        // releases both sides.
+        const SLV: u32 = 0x42;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, IIC1_BASE + 0x00, 1, 0x80); // slave ICE
+        sys.p.write(sys, IIC1_BASE + 0x0A, 1, SLV << 1); // SAR0
+        sys.p.write(sys, IIC0_BASE + 0x00, 1, 0x80); // master ICE
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x62); // MST|TRS|ST
+        sys.tick();
+        let wr = |sys: &crate::system::WasmSystem, b: u32| {
+            sys.p.write(sys, IIC0_BASE + 0x12, 1, b);
+            sys.tick();
+        };
+        wr(sys, SLV << 1); // SLA+W
+        assert_eq!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & 0x10, 0, "no NACK");
+        assert_ne!(sys.p.read(sys, IIC1_BASE + 0x08, 1) & 1, 0, "AAS0");
+        assert_ne!(sys.p.read(sys, IIC1_BASE + 0x01, 1) & (1 << 7), 0, "slave BBSY");
+        wr(sys, 0xBE); // data -> slave
+        assert_ne!(sys.p.read(sys, IIC1_BASE + 0x09, 1) & (1 << 5), 0, "slave RDRF");
+        assert_eq!(sys.p.read(sys, IIC1_BASE + 0x13, 1) & 0xFF, 0xBE, "slave byte");
+        // Repeated START, SLA+R: slave asked to transmit (TDRE+TXI).
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x64); // RS
+        sys.tick();
+        wr(sys, (SLV << 1) | 1); // SLA+R
+        assert_ne!(sys.p.read(sys, IIC1_BASE + 0x09, 1) & (1 << 7), 0, "slave TDRE");
+        sys.p.write(sys, IIC1_BASE + 0x12, 1, 0xEF); // slave stages reply
+        let _ = sys.p.read(sys, IIC0_BASE + 0x13, 1); // master dummy slot
+        sys.tick();
+        assert_eq!(sys.p.read(sys, IIC0_BASE + 0x13, 1) & 0xFF, 0xEF, "master byte");
+        // STOP releases both; slave AAS clears like HW.
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x68); // SP
+        sys.tick();
+        assert_ne!(sys.p.read(sys, IIC1_BASE + 0x09, 1) & (1 << 3), 0, "slave STOP");
+        assert_eq!(sys.p.read(sys, IIC1_BASE + 0x08, 1) & 1, 0, "AAS clear");
+        // Wrong address NACKs; the slave never wakes.
+        sys.p.write(sys, IIC1_BASE + 0x09, 1, !(1 << 3) & 0xFF); // clear STOP
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x62); // ST
+        sys.tick();
+        wr(sys, 0x86); // SLA+W to 0x43
+        assert_ne!(sys.p.read(sys, IIC0_BASE + 0x09, 1) & (1 << 4), 0, "NACKF");
+        assert_eq!(sys.p.read(sys, IIC1_BASE + 0x08, 1) & 1, 0, "slave asleep");
+        sys.p.write(sys, IIC0_BASE + 0x01, 1, 0x68); // SP
+        sys.tick();
+    }
+
+    #[test]
+    fn ra4m1_map_spi_slave() {
+        // SPI0 master <-> SPI1 slave across the shared bus: the slave
+        // stages TX (no shift of its own), the master's shift clocks it
+        // out while sampling MOSI into the slave; empty slave shifts
+        // 0xFF; unread slave overruns like HW.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, SPI1_BASE + 0x00, 1, 0x40); // slave: SPE, MSTR=0
+        sys.p.write(sys, SPI1_BASE + 0x04, 1, 0x5A); // slave stages TX
+        assert_eq!(sys.p.read(sys, SPI1_BASE + 0x03, 1) & (1 << 7), 0, "no shift yet");
+        sys.p.write(sys, SPI0_BASE + 0x00, 1, 0x48); // master: MSTR + SPE
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0xA5); // shift
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0x5A, "master gets slave byte");
+        assert_eq!(sys.p.read(sys, SPI1_BASE + 0x04, 1) & 0xFF, 0xA5, "slave gets MOSI");
+        // Slave TX now empty: master clocks 0xFF out of it.
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x11);
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0xFF, "empty slave");
+        // Unread slave byte overruns on the next clocks.
+        sys.p.write(sys, SPI1_BASE + 0x04, 1, 0x77); // stage (slave RDR still holds 0x11)
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x22);
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x33);
+        assert_ne!(sys.p.read(sys, SPI1_BASE + 0x03, 1) & 1, 0, "slave OVRF");
+        assert_eq!(sys.p.read(sys, SPI1_BASE + 0x04, 1) & 0xFF, 0x11, "old kept");
+    }
+
+    #[test]
+    fn ra4m1_wire_slave_ok() {
+        // End-to-end I2C slave on real firmware: Arduino Wire masters on
+        // IIC1 while a bare-metal slave on IIC0 (no Wire1 on Minima)
+        // receives 0xBE and replies 0xEF; the LED lights once millis()
+        // passes and both directions match. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4wire1.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "LED never lit: Wire slave round-trip failed");
+    }
+
+    #[test]
+    fn ra4m1_spi_slave_ok() {
+        // End-to-end SPI slave on real firmware: a bare-metal sketch
+        // (no Arduino SPI slave API exists) runs SPI0 as master and SPI1
+        // as slave; the LED lights once millis() passes and the exchanged
+        // bytes match on both sides. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4spislv.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "LED never lit: SPI slave exchange failed");
     }
 
     #[test]

@@ -30,6 +30,9 @@ pub struct RaSpi {
     rdr: u8,
     sprf: bool,
     ovrf: bool,
+    /// Slave mode (MSTR=0): firmware-staged transmit byte, shifted out
+    /// when the bus master clocks us (taken, then None = shift 0xFF).
+    tx_staged: Option<u8>,
 }
 
 impl RaSpi {
@@ -38,7 +41,7 @@ impl RaSpi {
             return None;
         }
         let base = [SPI0_BASE, SPI1_BASE][ch];
-        Some(Box::new(Self { ch, base, regs: [0; 0x100], rdr: 0, sprf: false, ovrf: false }))
+        Some(Box::new(Self { ch, base, regs: [0; 0x100], rdr: 0, sprf: false, ovrf: false, tx_staged: None }))
     }
     pub fn new_spi0() -> Option<Box<dyn Peripheral>> {
         Self::new_spi(0)
@@ -51,6 +54,23 @@ impl RaSpi {
         if self.regs[0x00] & (1 << 5) != 0 {
             crate::system::icu_raise_event(sys, EVTS[self.ch][1]);
         }
+    }
+    /// Slave select: enabled with MSTR=0 (an enabled master has MSTR=1,
+    /// an untouched channel has SPE=0).
+    pub(crate) fn is_slave(&self) -> bool {
+        self.regs[0x00] & 0x48 == 0x40
+    }
+    /// Bus master clocks a byte through us: sample MOSI into RDR (overrun
+    /// if unread, like HW) and shift out the staged byte (0xFF if none).
+    pub(crate) fn slave_clock_in(&mut self, sys: &System, mosi: u8) -> u8 {
+        if self.sprf {
+            self.ovrf = true;
+        } else {
+            self.rdr = mosi;
+            self.sprf = true;
+        }
+        self.update_irq(sys);
+        self.tx_staged.take().unwrap_or(0xFF)
     }
 }
 
@@ -92,13 +112,23 @@ impl Peripheral for RaSpi {
             if idx >= 0x100 { continue; }
             let v = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
             if idx == 0x04 {
-                // SPDR data byte: shift now, sample MISO simultaneously.
-                let miso = if crate::system::sci_spi_loopback(self.base) { v } else { 0xFF };
-                if self.sprf {
-                    self.ovrf = true;
+                // SPDR data byte: master shifts now and samples MISO;
+                // slave stages TX (the master clocks it out later).
+                if self.regs[0x00] & (1 << 3) != 0 {
+                    // Master: a selected slave sources MISO, else the
+                    // loopback jig echoes, else the bus pulls up 0xFF.
+                    let miso = crate::system::spi_slave_shift(sys, self.ch, v)
+                        .unwrap_or_else(|| {
+                            if crate::system::sci_spi_loopback(self.base) { v } else { 0xFF }
+                        });
+                    if self.sprf {
+                        self.ovrf = true;
+                    } else {
+                        self.rdr = miso;
+                        self.sprf = true;
+                    }
                 } else {
-                    self.rdr = miso;
-                    self.sprf = true;
+                    self.tx_staged = Some(v);
                 }
                 self.update_irq(sys);
             } else if idx == 0x03 {

@@ -177,6 +177,84 @@ pub fn sci_spi_loopback(base: u32) -> bool {
     sci_spi_loopback_set().lock().unwrap().contains(&base)
 }
 
+// ── Shared I2C bus fabric (master <-> slave across channels) ───────────────
+// Lets one channel's master talk to another channel's slave (SAR set,
+// MST clear) the way two pins would on a real bus: address match latches
+// AAS/BBSY on the slave, data bytes route master->slave ICDRR and
+// slave ICDRT->master ICDRR, STOP releases both. Falls back to nothing
+// (the caller keeps its virtual-EEPROM jig) when no slave answers.
+fn i2c_each_slave(sys: &WasmSystem, from_ch: Option<usize>, f: &mut dyn FnMut(usize, &mut crate::peripherals::ra_i2c::RaIic)) {
+    for slot in sys.p.peripherals.iter() {
+        if !(0x4005_3000..0x4005_3300).contains(&slot.start) || (slot.start - 0x4005_3000) % 0x100 != 0 {
+            continue;
+        }
+        let ch = ((slot.start - 0x4005_3000) / 0x100) as usize;
+        if Some(ch) == from_ch {
+            continue;
+        }
+        let mut b = slot.peripheral.borrow_mut();
+        if let Some(u) = b.as_any_mut().downcast_mut::<crate::peripherals::ra_i2c::RaIic>() {
+            if u.is_slave_candidate() {
+                f(ch, u);
+            }
+        }
+    }
+}
+pub fn i2c_slave_match(sys: &WasmSystem, from_ch: usize, addr: u8, read: bool) -> Option<usize> {
+    let mut hit = None;
+    i2c_each_slave(sys, Some(from_ch), &mut |ch, u| {
+        if hit.is_none() && u.slave_match(sys, addr, read) {
+            hit = Some(ch);
+        }
+    });
+    hit
+}
+pub fn i2c_slave_receive(sys: &WasmSystem, from_ch: usize, ch: usize, b: u8) {
+    i2c_each_slave(sys, Some(from_ch), &mut |c, u| {
+        if c == ch {
+            u.slave_receive(sys, b);
+        }
+    });
+}
+pub fn i2c_slave_take_tx(sys: &WasmSystem, from_ch: usize, ch: usize) -> Option<u8> {
+    let mut out = None;
+    i2c_each_slave(sys, Some(from_ch), &mut |c, u| {
+        if c == ch {
+            out = u.slave_take_tx(sys);
+        }
+    });
+    out
+}
+pub fn i2c_slave_stop(sys: &WasmSystem, from_ch: usize, ch: usize) {
+    i2c_each_slave(sys, Some(from_ch), &mut |c, u| {
+        if c == ch {
+            u.slave_stop(sys);
+        }
+    });
+}
+
+// ── Shared SPI bus (master clocks a slave on the other channel) ───────────
+// Returns the byte the selected slave shifted out (None = no slave wired,
+// caller falls back to loopback jig / pulled-up 0xFF).
+pub fn spi_slave_shift(sys: &WasmSystem, from_ch: usize, mosi: u8) -> Option<u8> {
+    for slot in sys.p.peripherals.iter() {
+        if slot.start != 0x4007_2000 && slot.start != 0x4007_2100 {
+            continue;
+        }
+        let ch = if slot.start == 0x4007_2000 { 0 } else { 1 };
+        if ch == from_ch {
+            continue;
+        }
+        let mut b = slot.peripheral.borrow_mut();
+        if let Some(u) = b.as_any_mut().downcast_mut::<crate::peripherals::ra_spi::RaSpi>() {
+            if u.is_slave() {
+                return Some(u.slave_clock_in(sys, mosi));
+            }
+        }
+    }
+    None
+}
+
 // ── Dataflash backing (8KB @ 0x40100000, erased 0xFF) ───────────────────────
 // Shared by the dataflash memory window and the FACI program/erase engine.
 pub const DATAFLASH_SIZE: usize = 8192;

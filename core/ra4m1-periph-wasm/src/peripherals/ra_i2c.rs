@@ -46,6 +46,13 @@ pub struct RaIic {
     expect_ptr: bool,
     eeprom: [u8; 256],
     eptr: u8,
+    /// Master side: slave channel currently addressed on the shared bus
+    /// fabric (None = virtual-EEPROM jig path).
+    fabric: Option<usize>,
+    /// Slave side: latched while an external master addresses our SAR.
+    slave_active: bool,
+    /// Slave side: true while the master reads from us (we transmit).
+    slave_tx: bool,
 }
 
 impl RaIic {
@@ -71,6 +78,9 @@ impl RaIic {
             expect_ptr: false,
             eeprom: [0; 256],
             eptr: 0,
+            fabric: None,
+            slave_active: false,
+            slave_tx: false,
         }))
     }
     fn ev(&self, k: usize) -> u32 { EVTS[self.ch][k] } // 0 RXI 1 TXI 2 TEI 3 ERI
@@ -91,6 +101,67 @@ impl RaIic {
         self.bbsy = false;
         self.pending = None;
         self.addr_phase = false;
+        self.fabric = None;
+        self.slave_active = false;
+        self.slave_tx = false;
+    }
+    /// Slave candidate: enabled, not master, and offering an address.
+    /// (An idle master also has MST=0, but the master flow never programs
+    /// SAR, so SAR!=0 means slave.)
+    pub(crate) fn is_slave_candidate(&self) -> bool {
+        self.cfg[0x00] & (1 << 7) != 0
+            && self.cfg[0x01] & 0x40 == 0
+            && (self.cfg[0x0A] | self.cfg[0x0C] | self.cfg[0x0E]) != 0
+    }
+    /// External-master address phase against our SARs. Latches AAS/BBSY;
+    /// on slave-transmit raises TXI so firmware stages the first byte.
+    pub(crate) fn slave_match(&mut self, sys: &System, addr: u8, read: bool) -> bool {
+        let mut hit = None;
+        for (k, off) in [(0u8, 0x0A), (1, 0x0C), (2, 0x0E)] {
+            if self.cfg[off] >> 1 == addr {
+                hit = Some(k);
+                break;
+            }
+        }
+        if let Some(k) = hit {
+            self.slave_active = true;
+            self.slave_tx = read;
+            self.cfg[0x08] |= 1 << k; // ICSR1.AASx like HW
+            self.bbsy = true;
+            if read {
+                self.tdre = true;
+                self.raise(sys, 1, 1 << 7); // TXI: stage a byte
+            }
+            true
+        } else {
+            false
+        }
+    }
+    /// External-master data byte arriving (slave-receive).
+    pub(crate) fn slave_receive(&mut self, sys: &System, b: u8) {
+        self.rdr = b;
+        self.rdrf = true;
+        self.raise(sys, 0, 1 << 5); // RXI
+    }
+    /// External-master clocking a byte out of us (slave-transmit): consume
+    /// the firmware-staged ICDRT byte, ask for the next one.
+    pub(crate) fn slave_take_tx(&mut self, sys: &System) -> Option<u8> {
+        if let Some(b) = self.pending.take() {
+            self.tdre = true;
+            self.raise(sys, 1, 1 << 7); // TXI
+            Some(b)
+        } else {
+            None
+        }
+    }
+    /// External-master STOP: latch STOP, drop off the bus like HW.
+    pub(crate) fn slave_stop(&mut self, sys: &System) {
+        self.slave_active = false;
+        self.slave_tx = false;
+        self.bbsy = false;
+        self.cfg[0x08] &= !0x07; // AAS clears on STOP
+        self.stop = true;
+        self.raise(sys, 3, 1 << 3); // ERI/SPIE
     }
     /// Ship the staged ICDRT byte (tick): address match/NACK or data.
     fn ship(&mut self, sys: &System) {
@@ -105,7 +176,22 @@ impl RaIic {
             self.addr_phase = false;
             let addr = b >> 1;
             self.read_dir = b & 1 != 0;
-            if addr == SLAVE_ADDR {
+            // A repeated START leaves the previous fabric slave: the new
+            // address phase re-selects (old slave sees START, not STOP).
+            if let Some(old) = self.fabric.take() {
+                crate::system::i2c_slave_stop(sys, self.ch, old);
+            }
+            if let Some(ch) = crate::system::i2c_slave_match(sys, self.ch, addr, self.read_dir) {
+                // Shared-bus slave answered: ACK like HW (no NACKF).
+                self.fabric = Some(ch);
+                if self.read_dir {
+                    self.cfg[0x01] &= !(1 << 5);
+                    self.rdrf = true;
+                    self.raise(sys, 0, 1 << 5); // RXI (dummy, FSP discards)
+                } else {
+                    self.cfg[0x01] |= 1 << 5;
+                }
+            } else if addr == SLAVE_ADDR {
                 if self.read_dir {
                     // SLA+R ACK drops the master to receive (TRS auto).
                     // RDRF+RXI fire now, but byte0 has NOT arrived yet:
@@ -125,7 +211,10 @@ impl RaIic {
                 self.raise(sys, 3, 1 << 4); // ERI/NAKIE
             }
         } else if !self.read_dir {
-            if self.expect_ptr {
+            if let Some(ch) = self.fabric {
+                // Shared-bus slave takes the data byte.
+                crate::system::i2c_slave_receive(sys, self.ch, ch, b);
+            } else if self.expect_ptr {
                 self.eptr = b;
                 self.expect_ptr = false;
             } else {
@@ -224,7 +313,10 @@ impl Peripheral for RaIic {
                     }
                     if v & (1 << 3) != 0 {
                         // STOP: release the bus back to slave, latch
-                        // STOP+TEND.
+                        // STOP+TEND. A fabric slave sees the STOP too.
+                        if let Some(ch) = self.fabric.take() {
+                            crate::system::i2c_slave_stop(sys, self.ch, ch);
+                        }
                         self.bbsy = false;
                         self.cfg[0x01] &= !0x40; // MST auto-clear
                         self.stop = true;
@@ -278,6 +370,13 @@ impl Peripheral for RaIic {
         if self.cfg[0x00] & (1 << 7) == 0 {
             return;
         }
+        if self.slave_active || self.is_slave_candidate() {
+            // Slave side: clocked entirely by the external master (its
+            // ship/stream calls our slave_* entry points directly). A
+            // SAR-offering channel must never run the master ship path,
+            // or it would consume its own staged ICDRT byte.
+            return;
+        }
         // Multi-byte staging matches the FSP poll rate (one byte/tick);
         // the proof ticks between bytes.
         self.ship(sys);
@@ -286,10 +385,20 @@ impl Peripheral for RaIic {
         // like HW holding SCL). The FSP RXI ISR dummy-reads the stale
         // flag first, then takes real bytes - same order here.
         if self.read_dir && self.bbsy && !self.addr_phase && !self.rdrf {
-            self.rdr = self.eeprom[self.eptr as usize];
-            self.eptr = self.eptr.wrapping_add(1);
-            self.rdrf = true;
-            self.raise(sys, 0, 1 << 5); // RXI
+            if let Some(ch) = self.fabric {
+                // Fabric slave feeds us when it has staged a byte; an
+                // empty slave holds SCL (no byte, no flag) like HW.
+                if let Some(b) = crate::system::i2c_slave_take_tx(sys, self.ch, ch) {
+                    self.rdr = b;
+                    self.rdrf = true;
+                    self.raise(sys, 0, 1 << 5); // RXI
+                }
+            } else {
+                self.rdr = self.eeprom[self.eptr as usize];
+                self.eptr = self.eptr.wrapping_add(1);
+                self.rdrf = true;
+                self.raise(sys, 0, 1 << 5); // RXI
+            }
         }
     }
 }
