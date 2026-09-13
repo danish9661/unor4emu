@@ -200,14 +200,19 @@ impl FlatMemory {
         let settings = self.rd_ram_u32(info);
         let src = self.rd_ram_u32(info.wrapping_add(4));
         let dest = self.rd_ram_u32(info.wrapping_add(8));
-        // FSP transfer_info_t real layout: num_blocks low byte at +14,
-        // high byte at +15 (dump: 04 04 -> 0x404 = 1028). +12..+13 are
-        // the (length, chain-transfer) fixed 0 halfword here.
-        let length = self.rd_ram_u16(info.wrapping_add(14));
+        // Real transfer_info_t layout (r_transfer_api.h): settings +0,
+        // p_src +4, p_dest +8, num_blocks u16 +12, length u16 +14.
+        // Repeat/block modes run on the CRA counter: R_DTC doubles the
+        // programmed length into CRAL+CRAH (r_dtc.c: length =
+        // (CRAL<<8)|CRAL), so the live low half reads e.g. 0x1818 for
+        // length=24. CRAL (low byte) is the transfer count; normal
+        // mode reads the full halfword (no doubling there).
+        let mode = (settings >> 30) & 3;
+        let raw = self.rd_ram_u16(info.wrapping_add(14));
+        let length = if mode == 0 { raw } else { raw & 0xFF };
         if length == 0 {
             return;
         }
-        let mode = (settings >> 30) & 3;
         if mode == 2 || mode == 3 {
             return; // block/chain modes unmodeled (no consumer)
         }

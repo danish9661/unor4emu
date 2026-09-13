@@ -413,6 +413,8 @@ impl Cpu {
         // Lazy FP stacking decision (model read, no mem writes yet):
         // CONTROL.FPCA (thread uses the FPU) + FPCCR.ASPEN select the
         // 26-word extended frame; otherwise the classic 8-word frame.
+        // (ASPEN = bit 31. The LSPEN bit 30 below chooses lazy vs eager
+        // stacking of the S-regs once the extended frame is selected.)
         let fpccr0 = sys.p.read(sys, 0xE000EF34, 4);
         let fp_ext = self.regs.control & 4 != 0 && fpccr0 & (1 << 31) != 0;
         // ARM frame layout (low->high): R0-R3, R12, LR, PC, xPSR (+0..28),

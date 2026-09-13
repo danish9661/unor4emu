@@ -377,6 +377,47 @@ mod tests {
     }
 
     #[test]
+    fn ra4m1_analogwave_ok() {
+        // End-to-end AnalogWave on the real Arduino library: wave.sine(10)
+        // programs a GPT (PERIODIC) + R_DTC repeat (samples -> DAC DADR)
+        // via FspTimer/IRQManager/R_DTC_Open; the test samples DADR for a
+        // non-zero sine sample. Gaps closed to get here (GAS probes in
+        // core/docs: hireg/opbit/opbit5/opbit6/ldrd2/ldrd3/strd2 pin the
+        // 44/EA-EB/F/LDRD maps; itflags-style IT behavior for predicated
+        // T1 slots; MOV-reg T1 0x0000/imm==0 flagless so begin's cbz takes
+        // the timer path; DTC repeat length = CRAL low byte since R_DTC
+        // doubles length into CRAL/CRAH, so 24 reads 0x1818) — plus GPT
+        // write_sized so sub-word GTCR.CST starts the counter.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4aws.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let mut saw_sample = sys.p.read(sys, DAC_BASE, 4) & 0xFFF != 0;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if sys.p.read(sys, DAC_BASE, 4) & 0xFFF != 0 {
+                saw_sample = true;
+                break;
+            }
+        }
+        assert!(saw_sample, "DADR0 never showed an AnalogWave sample");
+    }
+
+    #[test]
     fn ra4m1_map_dmac_mem_to_mem() {
         use crate::cpu::mem::Memory;
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2859,6 +2900,43 @@ mod tests {
         assert_eq!(cpu.regs.r[3], 48, "ITE both-arms? r4={} r5={}", cpu.regs.r[4], cpu.regs.r[5]);
         assert_eq!(cpu.regs.r[4], 4, "mls");
         assert_eq!(cpu.regs.r[5], 0, "udiv");
+        // LDRD reg order pin (GAS ldrd2.s/ldrd3.s/strd2.s): Rt=op2[15:12]
+        // is the FIRST reg. ldrd r0,r1,[r4,#104]=E9D4 011A puts [addr]
+        // in r0. Guards the R_GPT_Start ctrl-load shape AnalogWave uses.
+        let mut img2 = vec![0u8; 0x200];
+        img2[0..4].copy_from_slice(&0x20008000u32.to_le_bytes());
+        img2[4..8].copy_from_slice(&0x00000101u32.to_le_bytes());
+        img2[0x100] = 0xD4; img2[0x101] = 0xE9;
+        img2[0x102] = 0x1A; img2[0x103] = 0x01;
+        img2[0x104] = 0xFE; img2[0x105] = 0xE7;
+        mem.load(&img2, FLASH_BASE);
+        mem.write32(0x20001000, 0xAAAAAAAA);
+        mem.write32(0x20001004, 0xBBBBBBBB);
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        cpu.regs.r[4] = 0x20001000 - 104;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 4);
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(cpu.regs.r[0], 0xAAAAAAAA, "ldrd Rt gets [addr]");
+        assert_eq!(cpu.regs.r[1], 0xBBBBBBBB, "ldrd Rt2 gets [addr+4]");
+        // MOV-reg T1 never sets flags (0x0000 class imm==0 is the flagless
+        // alias: GAS emits `mov r0,r5`=4628 and `movs r0,r5`=0028).
+        let mut img3 = vec![0u8; 0x200];
+        img3[0..4].copy_from_slice(&0x20008000u32.to_le_bytes());
+        img3[4..8].copy_from_slice(&0x00000101u32.to_le_bytes());
+        img3[0x100] = 0x28; img3[0x101] = 0x46; // mov r0,r5
+        img3[0x102] = 0xFE; img3[0x103] = 0xE7;
+        mem.load(&img3, FLASH_BASE);
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        cpu.regs.r[5] = 0;
+        cpu.regs.xpsr |= 0x40000000; // Z=1 seed
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 2);
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(cpu.regs.r[0], 0);
+        assert_eq!((cpu.regs.xpsr >> 30) & 1, 1, "Z preserved through MOV-reg");
     }
 
     #[test]

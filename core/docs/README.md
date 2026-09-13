@@ -40,3 +40,15 @@ Key derivations are written up in AGENTS.md §25 (encoding rules + gotchas).
 | `ex.s`, `ex2.s`–`ex4.s` | LDREX/STREX size/offset forms (incl. the offset-word nibble edge case) |
 | `sh.s` | Shift-register flag setting, SXTAB16/UXTAB16 shadowing |
 | `tform.s`, `tform2.s` | LDRT/STRT family: op2[11:8]==0xE marks as-unprivileged (privileged PUW uses 0xB/0xC/0xF); the decoder's MPU privilege override keys off exactly this nibble |
+
+## Integer data-processing (`EA`/`EB`/`F`/`44`/`E8` arms, AnalogWave work)
+
+| File | What it pins |
+|---|---|
+| `hireg.s` | High-reg T1: `add`/`cmp`/`mov r8,r0` = 4480/4580/4680 → Rd=[2:0]+D(bit7), Rs=[6:3] (decoder had Rd/Rs swapped, breaking `mov r8,r0`-style double moves) |
+| `opbit.s` | Shifted-reg op/S bits: `orr`/`orrs`=EA41/EA51, `eor`/`eors`=EA80/EA90, `add`/`adds`=EB00/EB10, `rsbs`/`rsb`=EBD4/EBC4 → op=o1[8:5], S=o1[4] (old shifted-pattern table decoded EOR as ORR) |
+| `opbit5.s` | Modified-imm op/S bits: `adds`/`add`=F110/F100, `subs`/`sub`=F1B0/F1A0, `movs`/`mov`=F05F/F04F, `rsbs`/`rsb`=F1D0/F1C0, `adcs`/`adc`=F150/F140, `sbcs`/`sbc`=F170/F160 → same op=o1[8:5], S=o1[4] rule as shifted-reg |
+| `opbit6.s` | Logic-imm op/S bits: `and`/`bic`/`orr`/`orn`/`eor`=F000/F020/F040/F060/F080, `ands`/`eors`=F010/F090 → op=o1[8:5], S=o1[4]; CMN is ADD+S/Rd=15 (no separate opcode) |
+| `ldrd2.s` | LDRD/STRD order: `ldrd r2,r3,[r3,#8]`=E9D3 2302, `ldrd r0,r1,[r4,#104]`=E9D4 011A, `strd r8,r9,[r4,#96]`=E9C4 8918 → Rt=op2[15:12] is FIRST |
+| `ldrd3.s` | LDRD/STRD order, zero-offset forms: `ldrd r0,r1,[r2]`=E9D2 0100, `ldrd r4,r5,[r6]`=E9D6 4500, `strd r8,r9,[r4]`=E9C4 8900 → same Rt-first rule, unambiguous |
+| `strd2.s` | STRD order incl. crossed regs: `strd r2,r0,[r4,#68]`=E9C4 2011 ([15:12]=2 first), plus repeats of the strd2/ldrd2 forms |

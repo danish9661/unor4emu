@@ -994,15 +994,26 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         adv(cpu, pc, 2);
         return true;
     }
-    // LSL/LSR/ASR imm, ADD/SUB reg+imm3 (all flag-setting)
+    // LSL-imm T1 (flag-setting outside IT; predicated slots preserve
+    // flags) vs MOV-reg T1 (NEVER sets flags: GAS assembles `mov r0,r5`
+    // as 4628 and even `lsls r0,r5,#0` as the flagless alias 0028 — the
+    // 0x0000 class with imm==0 is ALWAYS MOV-reg).
     if o & 0xF800 == 0x0000 {
         let (rd, rs) = ((o & 7) as usize, ((o >> 3) & 7) as usize);
         let im = (o >> 6) & 0x1F;
         let v = rr(cpu, rs, pc);
+        if im == 0 {
+            // MOV-reg: flagless, inside IT or out.
+            cpu.regs.r[rd] = v;
+            adv(cpu, pc, 2);
+            return true;
+        }
         let (r, co) = shift_op(v, 0, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
-        nz(cpu, r);
-        cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        if !cpu.it_pred {
+            nz(cpu, r);
+            cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -1015,8 +1026,10 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         let v = rr(cpu, rs, pc);
         let (r, co) = shift_op(v, 1, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
-        nz(cpu, r);
-        cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        if !cpu.it_pred {
+            nz(cpu, r);
+            cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -1029,8 +1042,10 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         let v = rr(cpu, rs, pc);
         let (r, co) = shift_op(v, 2, im, carry(cpu), false);
         cpu.regs.r[rd] = r;
-        nz(cpu, r);
-        cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        if !cpu.it_pred {
+            nz(cpu, r);
+            cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+        }
         adv(cpu, pc, 2);
         return true;
     }
@@ -1133,98 +1148,147 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
         adv(cpu, pc, 2);
         return true;
     }
-    // ALU ops
+    // ALU ops (T1 data-processing: implicit-S; a predicated WRITEBACK
+    // slot preserves flags. The TEST ops (TST sop 8, CMP sop 10, CMN
+    // sop 11) ALWAYS set flags, even predicated: flags are their only
+    // output. Writeback-vs-test is the rule, NOT slot number
+    // (printNumber's `ite le; addle` must preserve N for the addgt slot,
+    // while an `it pl; cmppl` must set C — both slot 1).
     if o & 0xFC00 == 0x4000 {
         let sop = (o >> 6) & 0xF;
         let (rs, rd) = (((o >> 3) & 7) as usize, (o & 7) as usize);
         let a = rr(cpu, rd, pc);
         let b = rr(cpu, rs, pc);
+        // Test ops always set flags; writeback ops preserve when predicated.
+        let pred = cpu.it_pred && sop != 8 && sop != 10 && sop != 11;
         match sop {
             0 => {
                 let r = a & b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !pred {
+                    nz(cpu, r);
+                }
             }
             1 => {
                 let r = a ^ b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !pred {
+                    nz(cpu, r);
+                }
             }
             2 => {
                 let (r, co) = shift_op(a, 0, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
-                cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                if !pred {
+                    nz(cpu, r);
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                }
             }
             3 => {
                 let (r, co) = shift_op(a, 1, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
-                cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                if !pred {
+                    nz(cpu, r);
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                }
             }
             4 => {
                 let (r, co) = shift_op(a, 2, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
-                cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                if !pred {
+                    nz(cpu, r);
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                }
             }
             5 => {
-                let r = add_flags(cpu, a, b, carry(cpu));
+                let r = if pred {
+                    a.wrapping_add(b).wrapping_add(carry(cpu))
+                } else {
+                    add_flags(cpu, a, b, carry(cpu))
+                };
                 cpu.regs.r[rd] = r;
             }
             6 => {
-                let r = sub_flags(cpu, a, b, carry(cpu));
+                let r = if pred {
+                    a.wrapping_sub(b).wrapping_sub(1 - carry(cpu))
+                } else {
+                    sub_flags(cpu, a, b, carry(cpu))
+                };
                 cpu.regs.r[rd] = r;
             }
             7 => {
                 let (r, co) = shift_op(a, 3, b & 0xFF, carry(cpu), true);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
-                cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                if !pred {
+                    nz(cpu, r);
+                    cpu.regs.xpsr = (cpu.regs.xpsr & !0x20000000) | (co << 29);
+                }
             }
             8 => {
-                sub_flags(cpu, a, b, 1);
+                if !pred {
+                    sub_flags(cpu, a, b, 1);
+                }
             }
             9 => {
-                // RSB (negate): Rd = 0 - Rs, with flags
-                let r = sub_flags(cpu, 0, b, 1);
+                // RSB (negate): Rd = 0 - Rs, with flags (implicit-S T1:
+                // a predicated slot preserves flags, like SUB-reg).
+                let r = if pred {
+                    (0u32).wrapping_sub(b)
+                } else {
+                    sub_flags(cpu, 0, b, 1)
+                };
                 cpu.regs.r[rd] = r;
             }
             10 => {
-                sub_flags(cpu, a, b, 1);
+                if !pred {
+                    sub_flags(cpu, a, b, 1);
+                }
             }
             11 => {
-                add_flags(cpu, a, b, 0);
+                if !pred {
+                    add_flags(cpu, a, b, 0);
+                }
             }
             12 => {
                 let r = a | b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !pred {
+                    nz(cpu, r);
+                }
             }
             13 => {
                 let r = a.wrapping_mul(b);
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !pred {
+                    nz(cpu, r);
+                }
             }
             14 => {
                 let r = a & !b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !pred {
+                    nz(cpu, r);
+                }
             }
             _ => {
                 let r = !b;
                 cpu.regs.r[rd] = r;
-                nz(cpu, r);
+                if !pred {
+                    nz(cpu, r);
+                }
             }
         }
         adv(cpu, pc, 2);
         return true;
     }
-    // high-register ops + BX/BLX (op select is bits[9:8])
+    // high-register ops + BX/BLX (op select is bits[9:8]).
+    // GAS map (hireg.s probe: add/cmp/mov r8,r0 = 4480/4580/4680):
+    // Rd = [2:0]+D(bit7), Rs = [6:3], i.e. rd = (o&7)|((o>>4)&8),
+    // rs = (o>>3)&0xF (probe pins the long-standing map; unchanged).
     if o & 0xFC00 == 0x4400 {
         let h = (o >> 8) & 3;
-        let rs = ((o >> 3) & 0xF) as usize;
         let rd = ((o & 7) | ((o >> 4) & 8)) as usize;
+        let rs = ((o >> 3) & 0xF) as usize;
         match h {
             0 => {
                 let r = rr(cpu, rd, pc).wrapping_add(rr(cpu, rs, pc));
@@ -2011,23 +2075,21 @@ pub fn exec32(
         }
         // modified-immediate data processing (F000-F5FF, op2 < 0x8000)
         if o2 & 0x8000 == 0 {
-            let b8 = (o1 >> 8) & 1;
-            let b7 = (o1 >> 7) & 1;
-            let b6 = (o1 >> 6) & 1;
-            let b5 = (o1 >> 5) & 1;
+            let opc = (o1 >> 5) & 0xF;
             let s = (o1 & 0x10) != 0;
-            // GAS-verified op table (uniform across F and EA/EB groups)
-            let op = match (b8 << 3) | (b7 << 2) | (b6 << 1) | b5 {
-                0b0000 => 0,  // AND
-                0b0001 => 1,  // BIC
-                0b0010 => 2,  // ORR
-                0b0011 => 3,  // MVN/ORN
-                0b0100 => 4,  // EOR
-                0b1000 => 8,  // ADD
-                0b1010 => 10, // ADC
-                0b1011 => 11, // SBC
-                0b1101 => 13, // SUB
-                0b1110 => 14, // RSB
+            // GAS-verified op table (opbit5/6.s probes: op = o1[8:5],
+            // S = o1[4]; uniform across F and EA/EB groups).
+            let op = match opc {
+                0x0 => 0,  // AND
+                0x1 => 1,  // BIC
+                0x2 => 2,  // ORR
+                0x3 => 3,  // ORN/MVN
+                0x4 => 4,  // EOR
+                0x8 => 8,  // ADD (CMN when S=1/Rd=15)
+                0xA => 10, // ADC
+                0xB => 11, // SBC
+                0xD => 13, // SUB (CMP when S=1/Rd=15)
+                0xE => 14, // RSB
                 _ => return fault(cpu, pc, op1, op2, 4),
             };
             let rn = (o1 & 0xF) as usize;
@@ -3194,24 +3256,25 @@ pub fn exec32(
             _ => return fault(cpu, pc, op1, op2, 4),
         }
         // ---- EA/EB: shifted-register data processing ----
+        // GAS map (opbit.s probes): op = o1[8:5] (4 bits), S = o1[4].
+        // 0x0=AND 0x1=BIC 0x2=ORR 0x3=ORN/MVN 0x4=EOR 0x8=ADD 0xA=ADC
+        // 0xB=SBC 0xD=SUB 0xE=RSB 0x6=PKHBT/PKHTB (probe pins the
+        // long-standing bit-split; same values, clearer read).
     } else if o1 & 0xFF00 == 0xEA00 || o1 & 0xFF00 == 0xEB00 {
-        let b8 = (o1 >> 8) & 1;
-        let b7 = (o1 >> 7) & 1;
-        let b6 = (o1 >> 6) & 1;
-        let b5 = (o1 >> 5) & 1;
+        let opc = (o1 >> 5) & 0xF;
         let s = (o1 & 0x10) != 0;
-        let op = match (b8 << 3) | (b7 << 2) | (b6 << 1) | b5 {
-            0b0010 => 2,  // ORR
-            0b1000 => 8,  // ADD
-            0b1010 => 10, // ADC
-            0b1011 => 11, // SBC
-            0b1101 => 13, // SUB
-            0b1110 => 14, // RSB
-            0b0000 => 0,  // AND
-            0b0001 => 1,  // BIC
-            0b0011 => 3,  // MVN/ORN
-            0b0100 => 4,  // EOR
-            0b0110 => 6,  // PKHBT/PKHTB
+        let op = match opc {
+            0x2 => 2,  // ORR
+            0x8 => 8,  // ADD
+            0xA => 10, // ADC
+            0xB => 11, // SBC
+            0xD => 13, // SUB
+            0xE => 14, // RSB
+            0x0 => 0,  // AND
+            0x1 => 1,  // BIC
+            0x3 => 3,  // ORN/MVN
+            0x4 => 4,  // EOR
+            0x6 => 6,  // PKHBT/PKHTB
             _ => return fault(cpu, pc, op1, op2, 4),
         };
         let rn = (o1 & 0xF) as usize;
@@ -3275,6 +3338,9 @@ pub fn exec32(
             return true;
         }
         let test = s && rd == 15;
+        // TST/TEQ/CMP/CMN (S=1, Rd=15: e.g. teq.w r1,r3 = EA91 0F03)
+        // set flags with NO writeback; alu_op already returns None for
+        // the test form, so the shared match below advs with no branch.
         match alu_op(cpu, op, s, a, sv, ci, co, test) {
             Some(r) => {
                 if rd == 15 {
@@ -3440,7 +3506,9 @@ pub fn exec32(
             if !p && !w {
                 return fault(cpu, pc, op1, op2, 4); // P=0,W=0: UNDEFINED
             }
-            // GAS-verified: first reg Rt = op2[15:12], second Rt2 = op2[11:8].
+            // GAS map (ldrd2.s/ldrd3.s/strd2.s probes): Rt = op2[15:12] is
+            // the FIRST reg in the asm list, Rt2 = op2[11:8] the second
+            // (probe pins the long-standing order; unchanged).
             let rt = ((o2 >> 12) & 0xF) as usize;
             let rt2 = ((o2 >> 8) & 0xF) as usize;
             // LDRD/STRD imm8 is word-scaled (GAS: `ldrd [r3],#8` = op2 0x02).

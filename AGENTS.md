@@ -7,8 +7,8 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 206: 128 legacy CPU + 78 R4 proofs)
-  and in `core/ra4m1-core` (79 R4 proofs: 78 mirror + EK zero-boot) and
+  `core/ra4m1-periph-wasm` (currently 117: 37 legacy CPU/system + 80 R4 proofs)
+  and in `core/ra4m1-core` (80 R4 proofs: 79 mirror + EK zero-boot) and
   `cargo build` green in the top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -26,12 +26,12 @@ disk but is excluded from the workspace until its code is ready.
 - `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
   excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
   STM32 peripherals remain as reference until their RA replacements land.
-  206 tests must stay green (128 legacy CPU + 78 R4 proofs).
+  117 tests must stay green (37 legacy CPU/system + 80 R4 proofs).
 - `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
   CPU + ARM + RA peripherals, NO STM32 code, deps are only
   `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
   Release WASM is ~225KB vs ~2.1MB for the snapshot core (~9.4x smaller).
-  Its 79 `ra4m1.rs` proofs (78 mirror + EK zero-boot) track the snapshot and must stay green.
+  Its 80 `ra4m1.rs` proofs (79 mirror + EK zero-boot) track the snapshot and must stay green.
 - `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
   `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
   No STM32 and no ESP32 code may ever link here.
@@ -45,9 +45,9 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# snapshot core (206 tests, always single-threaded)
+# snapshot core (117 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# small core (79 R4 proofs)
+# small core (80 R4 proofs)
 cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
@@ -145,7 +145,10 @@ wasm wrappers can path-depend on it).
   17/24, MBR + write/read-back proof), CAN error counting (RECR/TECR +
   EIFR + ERI event 74, Arduino_CAN isError proof), DTC (IELSR.DTCE +
   SRAM vector table + repeat engine serviced in the mem path, GPT->DAC
-  firmware proof), GPT PWM output (GTIOA/B function 0 + OAE/OBE, PFS
+  firmware proof; repeat length reads CRAL, the CRA low byte, since
+  R_DTC doubles length into CRAL+CRAH), AnalogWave sine (real
+  `analogWave.sine(10)` GPT->DTC->DAC12 firmware proof, `r4aws.bin`),
+  GPT PWM output (GTIOA/B function 0 + OAE/OBE, PFS
   PSEL routing per the Minima pinmux table, 25% duty measured on D6),
   CAN1 (eventless polled self-test proof), DAC8 (retain + DAM gate),
   TSN calibration constants, SLCDC regs + display RAM, KINT key
@@ -167,6 +170,15 @@ wasm wrappers can path-depend on it).
   predicated T1 ADD/SUB-imm preserves flags like MOVS/ADD-reg/SUB-reg
   already did (`ite le; addle; addgt` ran both arms and broke every
   integer print - fixed in both cores' thumb.rs, §12 upstream);
+  predicated T1 shifts (LSL/LSR/ASR-imm) and the 0x4000 ALU block
+  preserve flags the same way, with the TST/CMP/CMN test ops always
+  setting flags (their only output - fixed in both cores' thumb.rs,
+  §15 upstream); MOV-reg T1 (0x0000 class, imm==0) never sets flags -
+  GAS emits even `lsls r0,r5,#0` as the flagless alias 0028 (fixed in
+  both cores' thumb.rs, §14 upstream);
+  DTC repeat/block length is the CRA low byte (CRAL): R_DTC doubles the
+  programmed length into CRAL+CRAH, so 24 reads back 0x1818 (fixed in
+  both cores' mem.rs - the AnalogWave sine proof needed it);
   RIIC ST auto-sets MST/TRS (FSP writes ST alone, then polls MST);
   RIIC TDRE+TXI fire on START and latched flags fire on ICIER enable
   (the interrupt-driven FSP flow waits on both, never on flag edges);
@@ -226,7 +238,8 @@ wasm wrappers can path-depend on it).
 `ra4m1_map_usb_suspend_resume`, `ra4m1_usb_hid_keyboard`,
 `ra4m1_usb_suspend_resume_ok`, `ra4m1_map_sd_card`, `ra4m1_sd_ok`,
 `ra4m1_map_can_errors`, `ra4m1_can_error_ok`, `ra4m1_map_dtc_repeat`,
-`ra4m1_dtc_ok`, `ra4m1_pwm_ok`, `ra4m1_analogwrite_ok` (NEW: analogWrite(6,64) GPT0 GTPR97958 GTCCRB~24.5k via BER, OBE), `ra4m1_tone_ok` (NEW: tone(LED,440) GPT4 PERIODIC toggle), `ra4m1_map_can1_loopback`,
+`ra4m1_dtc_ok`, `ra4m1_analogwave_ok` (NEW: real `analogWave.sine(10)`
+GPT->DTC->DAC12 sine proof, `r4aws.bin`), `ra4m1_pwm_ok`, `ra4m1_analogwrite_ok` (NEW: analogWrite(6,64) GPT0 GTPR97958 GTCCRB~24.5k via BER, OBE), `ra4m1_tone_ok` (NEW: tone(LED,440) GPT4 PERIODIC toggle), `ra4m1_map_can1_loopback`,
 `ra4m1_can1_ok`, `ra4m1_map_dac8`, `ra4m1_dac8_ok`, `ra4m1_map_tsn`,
 `ra4m1_map_slcdc`, `ra4m1_map_kint`, `ra4m1_kint_ok`,
 `ra4m1_map_ssi`, `ra4m1_ssi_ok`, `ra4m1_matrix_ok`, `ra4m1_softserial_ok`,
@@ -257,7 +270,8 @@ at zero executes shifted garbage (looks plausible, faults in an epilogue).
 (CTSU mutual), `core/blinky/r4hid.bin` (HID keyboard),
 `core/blinky/r4susp.bin` (suspend/resume) and
 `core/blinky/r4sd.bin` (SD card), `core/blinky/r4canerr.bin`
-(CAN errors), `core/blinky/r4dtc.bin` (GPT->DAC via DTC),
+(CAN errors), `core/blinky/r4dtc.bin` (GPT->DAC via DTC), `core/blinky/r4aws.bin`
+(AnalogWave sine via the real Arduino `analogWave` library),
 `core/blinky/r4pwm.bin` (GPT0 25% PWM on D6), `core/blinky/r4can1.bin`
 (CAN1 self-test), `core/blinky/r4dac8.bin` (DAC8),
 `core/blinky/r4kint.bin` (KINT key), `core/blinky/r4ssi.bin`
