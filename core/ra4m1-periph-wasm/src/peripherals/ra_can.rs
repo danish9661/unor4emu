@@ -33,6 +33,7 @@ use super::Peripheral;
 // on TFPCR=0xFF (TFUST counts), shipping one per tick with FIFO_TX
 // event 76. Error counting and mailbox search are accept-and-retain.
 pub const CAN0_BASE: u32 = 0x4005_0000;
+pub const CAN1_BASE: u32 = 0x4005_1000;
 pub const CAN0_FIFO_RX_EVENT: u32 = 75;
 pub const CAN0_FIFO_TX_EVENT: u32 = 76;
 pub const CAN0_MBOX_RX_EVENT: u32 = 77;
@@ -68,10 +69,25 @@ pub struct RaCan {
     recr: u8,
     tecr: u8,
     eifr: u8,
+    /// ELC events for mailbox-RX/TX, FIFO-RX/TX, error. CAN1 has no
+    /// event codes on this part (all zero = polled only, like the
+    /// eventless extra channels elsewhere).
+    ev_mrx: u32,
+    ev_mtx: u32,
+    ev_frx: u32,
+    ev_ftx: u32,
+    ev_err: u32,
 }
 
 impl RaCan {
     pub fn new_can0() -> Option<Box<dyn Peripheral>> {
+        Self::new_with_events(CAN0_MBOX_RX_EVENT, CAN0_MBOX_TX_EVENT, CAN0_FIFO_RX_EVENT, CAN0_FIFO_TX_EVENT, 74)
+    }
+    /// CAN1: identical mailboxes, no ELC event codes (polled only).
+    pub fn new_can1() -> Option<Box<dyn Peripheral>> {
+        Self::new_with_events(0, 0, 0, 0, 0)
+    }
+    fn new_with_events(mrx: u32, mtx: u32, frx: u32, ftx: u32, err: u32) -> Option<Box<dyn Peripheral>> {
         Some(Box::new(Self {
             mem: vec![0; 0x860],
             sent: [false; 32],
@@ -88,6 +104,11 @@ impl RaCan {
             recr: 0,
             tecr: 0,
             eifr: 0,
+            ev_mrx: mrx,
+            ev_mtx: mtx,
+            ev_frx: frx,
+            ev_ftx: ftx,
+            ev_err: err,
         }))
     }
     fn canm(&self) -> u16 {
@@ -139,7 +160,7 @@ impl RaCan {
         }
         let eier = self.mem[0x84C];
         if self.eifr & eier & 0x0E != 0 {
-            crate::system::icu_raise_event(sys, 74); // ELC_EVENT_CAN0_ERROR
+            crate::system::icu_raise_event(sys, self.ev_err);
         }
     }
     fn rfe(&self) -> bool { self.mem[0x848] & 1 != 0 }
@@ -173,7 +194,7 @@ impl RaCan {
             }
             // No enable gate exists for the FIFO interrupt (unlike MIER
             // for mailboxes); firmware opts in by routing event 75.
-            crate::system::icu_raise_event(sys, CAN0_FIFO_RX_EVENT);
+            crate::system::icu_raise_event(sys, self.ev_frx);
             return;
         }
         if let Some(rx) = (0..32).find(|&m| self.is_rx(m)) {
@@ -189,7 +210,7 @@ impl RaCan {
             }
             self.newdata[rx] = true;
             if self.mier(rx) {
-                crate::system::icu_raise_event(sys, CAN0_MBOX_RX_EVENT);
+                crate::system::icu_raise_event(sys, self.ev_mrx);
             }
         } else {
             self.nmlst = true;
@@ -206,7 +227,7 @@ impl RaCan {
             self.loopback_receive(sys, &frame);
         }
         if self.mier(n) {
-            crate::system::icu_raise_event(sys, CAN0_MBOX_TX_EVENT);
+            crate::system::icu_raise_event(sys, self.ev_mtx);
         }
     }
     fn search_result(&mut self) -> u8 {
@@ -415,7 +436,7 @@ impl Peripheral for RaCan {
                     if self.test_loopback() {
                         self.loopback_receive(sys, &frame);
                     }
-                    crate::system::icu_raise_event(sys, CAN0_FIFO_TX_EVENT);
+                    crate::system::icu_raise_event(sys, self.ev_ftx);
                 }
             }
         }

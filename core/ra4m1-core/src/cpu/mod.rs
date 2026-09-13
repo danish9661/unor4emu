@@ -1028,6 +1028,16 @@ impl Cpu {
             done += 1;
             if done & 15 == 0 {
                 crate::system::INSTRUCTION_COUNT.fetch_add(16u64, Ordering::Relaxed);
+                // Exact-phase advance for GPTs feeding DMAC links (see
+                // dmac_listened_gpt): event edges are discovered here,
+                // not only at coarse driver ticks, so deferred DMA units
+                // keep waveform phase. Outside the dma_active gate on
+                // purpose - idling must not stop discovery. Eight atomic
+                // loads when no link exists (free for all other tests).
+                let listened = crate::system::dmac_listened_gpt();
+                if !listened.is_empty() {
+                    sys.p.advance_gpts(sys, &listened);
+                }
                 // Drain staged DMA/DTC transfers (atomic-guarded, free
                 // when idle): event-triggered engines like DTC complete
                 // here, not on peripheral ticks (which own no RAM).

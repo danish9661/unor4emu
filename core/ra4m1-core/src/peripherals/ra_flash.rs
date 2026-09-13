@@ -129,6 +129,12 @@ impl Peripheral for RaFaci {
             // FSTATR1.FRDY (bit6) = sequencer running.
             b[0] |= 1 << 6;
         }
+        if o == 0x228 {
+            // TSN calibration data (factory trim, read-only): fixed
+            // plausible constants (documented synthetic - no consumer
+            // reads these on Minima, the temp value flows via ADC).
+            b = [0xE0, 0x08, 0, 0];
+        }
         u32::from_le_bytes(b)
     }
     fn write(&mut self, _sys: &System, offset: u32, value: u32) {

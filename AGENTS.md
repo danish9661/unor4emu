@@ -7,7 +7,7 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 184) and `cargo build` green in the
+  `core/ra4m1-periph-wasm` (currently 198) and `cargo build` green in the
   top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -25,12 +25,12 @@ disk but is excluded from the workspace until its code is ready.
 - `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
   excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
   STM32 peripherals remain as reference until their RA replacements land.
-  184 tests must stay green (128 legacy CPU + 56 R4 proofs).
+  198 tests must stay green (128 legacy CPU + 70 R4 proofs).
 - `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
   CPU + ARM + RA peripherals, NO STM32 code, deps are only
   `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
   Release WASM is ~225KB vs ~2.1MB for the snapshot core (~9.4x smaller).
-  Its 50 `ra4m1.rs` proofs mirror the snapshot's register-level ones and must stay green.
+  Its 70 `ra4m1.rs` proofs mirror the snapshot's one-for-one and must stay green.
 - `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
   `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
   No STM32 and no ESP32 code may ever link here.
@@ -44,9 +44,9 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# snapshot core (184 tests, always single-threaded)
+# snapshot core (198 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# small core (50 R4 proofs)
+# small core (70 R4 proofs)
 cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
@@ -73,14 +73,19 @@ wasm wrappers can path-depend on it).
 | SPI0/1 | `0x4007_2000`/`0x4007_2100` | `ra_spi.rs` RSPI master (polled SPRF + loopback, Arduino D11-13 probe to ch1) + slave (MSTR=0 staging + exchange) + virtual SD card |
 | IIC0-2 | `0x4005_3000`+ch*`0x100` | `ra_i2c.rs` RIIC master + virtual EEPROM slave at 0x50 + shared-bus slave (SAR/AAS/RXI/TXI/STOP; IIC2 eventless) |
 | CRC | `0x4007_4000` | `ra_misc.rs` IEEE-802.3 |
-| GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven (0-1: 32-bit; 8-13 eventless polled) |
+| GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` real offsets (GTCR+0x2C GTIOR+0x34 GTCNT+0x48 GTCCR+0x4C GTPR+0x64), wrap/compare/overflow events, GTIOA/B function-0 PWM latches routed to PORT via PFS (0-1: 32-bit; 8-13 eventless polled) |
 | AGT0-5 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` 16-bit count (2-5 eventless polled) |
 | ACMPLP/OPAMP | `0x4008_5E00`/`0x4008_6000` | `ra_opamp.rs` loopback + compare |
 | USBFS | `0x4009_0000` | `ra_usb.rs` endpoint FIFOs + TX capture + IRQs (CDC + HID, suspend/resume) |
 | CTSU | `0x4008_1000` | `ra_ctsu.rs` STRT->tick counters + END event (self + mutual MD=2) |
-| CAN0 | `0x4005_0000` | `ra_can.rs` mailbox TX/RX + self-test loopback + RX/TX FIFO via MB24 (CAN1: no routable events, unmapped) |
+| KINT | `0x4008_0000` | `ra_icu.rs` KRCTL/KRF/KRM + `kint_key_press` jig -> KEY_INT event 69 |
+| SLCDC | `0x4008_2000` | `ra_misc.rs` mode regs + 64B display RAM retain (no panel) |
+| SSI0 | `0x4004_E000` | `ra_ssi.rs` TX drain + RX pattern FIFO + TXI/RXI edges (Arduino I2S lib broken, bare-metal proven) |
+| CAN0 | `0x4005_0000` | `ra_can.rs` mailbox TX/RX + self-test loopback + RX/TX FIFO via MB24 (CAN1: polled-only, same mailboxes, no events) |
+| CAN1 | `0x4005_1000` | same model, eventless (polled SENTDATA/NEWDATA) |
 | DATAFLASH | `0x4010_0000` | `ra_flash.rs` 8KB window, erased `0xFF`, bit-clear writes |
 | FACI_LP | `0x407E_C000` | `ra_flash.rs` program/erase/blankcheck engine + FENTRYR |
+| DAC8 | `0x4009_E000` | `ra_analog.rs` DACS retain + DAM enable gate (no Arduino consumer) |
 | ARM | `0xE000_xxxx` | reuse NVIC/SysTick/SCB/MPU/FPU/DWT/STIR/ITM |
 
 `Peripherals::new_ra4m1()` builds this map. `WasmSystem::new_ra4m1()` +
@@ -136,7 +141,14 @@ wasm wrappers can path-depend on it).
   17/24, MBR + write/read-back proof), CAN error counting (RECR/TECR +
   EIFR + ERI event 74, Arduino_CAN isError proof), DTC (IELSR.DTCE +
   SRAM vector table + repeat engine serviced in the mem path, GPT->DAC
-  firmware proof).
+  firmware proof), GPT PWM output (GTIOA/B function 0 + OAE/OBE, PFS
+  PSEL routing per the Minima pinmux table, 25% duty measured on D6),
+  CAN1 (eventless polled self-test proof), DAC8 (retain + DAM gate),
+  TSN calibration constants, SLCDC regs + display RAM, KINT key
+  interrupt (`kint_key_press` jig + firmware proof), SSI0 audio FIFO
+  (TX drain + RX pattern + TXI/RXI, bare-metal proof - Arduino I2S
+  lib does not compile), LED matrix (12x8 charlieplex GPIO render,
+  smiley reconstruction proof + demo tab).
 - Hard-won truths: RA4M1 bases differ from RA6 everywhere (this §3 is from
   R7FA4M1AB.h, never assume); SYSC OPCCR resets 0x00 with timed TSF;
   AGT reload latches the programmed counter (AGTCMA untouched when output
@@ -163,7 +175,15 @@ wasm wrappers can path-depend on it).
   its RAM vector table at 0x20007F00 and a 1KB mask mangled it to
   0x20007C00, so every IRQ vectored into stack garbage (Blink survived
   by luck, FAT died) - fixed in both cores' scb.rs;
-- NEXT: WiFi un-park assessment, SDHI for FAT-over-SD. LED matrix
+  GPT offsets are the RA map (GTCR+0x2C GTPR+0x64 GTIOR+0x34), NOT the
+  old fiction (GTCR+0x00 GTPR+0x08) - FSP writes real offsets and the
+  old model ignored them (FSP GPT flows never ran); unprogrammed
+  compares (all-ones) must be bounded by the period or they false-fire
+  on every wrap; PORT/PFS are separate instances keyed by an explicit
+  flag (slot offsets never reach 0x800, the old test routed every PFS
+  access into the PORT arms - writes dropped, reads aliased, and a
+  PORT read re-borrowed its own cell);
+- NEXT: WiFi un-park assessment (waiting on S3 code). LED matrix
   (WiFi board) renders from RA GPIO pins, not as a peripheral.
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
@@ -195,7 +215,10 @@ wasm wrappers can path-depend on it).
 `ra4m1_map_usb_suspend_resume`, `ra4m1_usb_hid_keyboard`,
 `ra4m1_usb_suspend_resume_ok`, `ra4m1_map_sd_card`, `ra4m1_sd_ok`,
 `ra4m1_map_can_errors`, `ra4m1_can_error_ok`, `ra4m1_map_dtc_repeat`,
-`ra4m1_dtc_ok`.
+`ra4m1_dtc_ok`, `ra4m1_pwm_ok`, `ra4m1_map_can1_loopback`,
+`ra4m1_can1_ok`, `ra4m1_map_dac8`, `ra4m1_dac8_ok`, `ra4m1_map_tsn`,
+`ra4m1_map_slcdc`, `ra4m1_map_kint`, `ra4m1_kint_ok`,
+`ra4m1_map_ssi`, `ra4m1_ssi_ok`, `ra4m1_matrix_ok`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
 
@@ -220,22 +243,30 @@ at zero executes shifted garbage (looks plausible, faults in an epilogue).
 (CTSU mutual), `core/blinky/r4hid.bin` (HID keyboard),
 `core/blinky/r4susp.bin` (suspend/resume) and
 `core/blinky/r4sd.bin` (SD card), `core/blinky/r4canerr.bin`
-(CAN errors) and `core/blinky/r4dtc.bin` (GPT->DAC via DTC) are the
-vendored USB/I2C/SPI/CAN/touch/HID/SD/DTC proof builds, compiled the
-same way from their sketches.
+(CAN errors), `core/blinky/r4dtc.bin` (GPT->DAC via DTC),
+`core/blinky/r4pwm.bin` (GPT0 25% PWM on D6), `core/blinky/r4can1.bin`
+(CAN1 self-test), `core/blinky/r4dac8.bin` (DAC8),
+`core/blinky/r4kint.bin` (KINT key), `core/blinky/r4ssi.bin`
+(SSI audio FIFO) and `core/blinky/r4matrix.bin` (LED matrix smiley) are
+the vendored USB/I2C/SPI/CAN/touch/HID/SD/DTC/PWM proof builds,
+compiled the same way from their sketches.
 
 ## 8. Browser demo (`demo/`)
 
 `./demo/build.sh` then `python3 -m http.server -d demo 8901`: dark
 single page driving the 228KB Minima WASM (`WasmCpu` + the `usb_*` /
 `periph_*` free functions + `spi_set_sd_card`/`sd_read_block` for the
-SD tab). Eight tabs run the vendored firmware live: Blink (LED + full
-12x16 GPIO grid from PORT), Serial (in-page virtual-host enumeration
+SD tab). Fourteen tabs run the vendored firmware live: Blink (LED + full
+12x16 GPIO grid from PORT, plus a MIPS meter in the stats), Serial (in-page virtual-host enumeration
 with step checklist, hello in the terminal), Echo (bulk-pipe discovery
 via PIPECFG + typed round-trip), Wire (IIC1 master vs bare-metal IIC0
 slave flag trace), SPI (SPI0 master vs SPI1 slave flag trace), SD (init
 + MBR dump + block-1 recheck via export), CAN (RX-FIFO MB24 trace),
-EEPROM (live dataflash byte trace). Flag traces poll MMIO only - data
+  EEPROM (live dataflash byte trace), PWM (live duty readout on D6),
+  RTC (live BCD clock + rollover), CTSU (live SC/RC counters),
+  HID (report descriptor + INT-IN 'a' report),
+  Matrix (12x8 charlieplex GPIO render), Docs (coverage table).
+  Flag traces poll MMIO only - data
 registers (ICDRR/SPDR) are never read (a read would eat the firmware's
 byte); sub-word reads return unmasked packs, so JS masks (`% 256`).
 D13 = P111 (PORT1 bit 11), not bit 13. `demo/pkg/` + `demo/fw/` are

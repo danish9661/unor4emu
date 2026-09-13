@@ -212,6 +212,21 @@ pub fn icu_pin_edge(sys: &WasmSystem, line: usize, falling: bool) -> bool {
     false
 }
 
+/// Inject a key press on KINT KR `key` (virtual key matrix for the
+/// key-return controller). Returns whether the controller was enabled
+/// (and the KEY_INT event fired).
+pub fn kint_key_press(sys: &WasmSystem, key: usize) -> bool {
+    for slot in sys.p.peripherals.iter() {
+        if slot.start == crate::peripherals::ra_icu::KINT_BASE {
+            let mut b = slot.peripheral.borrow_mut();
+            if let Some(u) = b.as_any_mut().downcast_mut::<crate::peripherals::ra_icu::RaKint>() {
+                return u.key_press(sys, key);
+            }
+        }
+    }
+    false
+}
+
 pub fn icu_raise_event(sys: &WasmSystem, event: u32) {
     if std::env::var("EVLOG").is_ok() && event == 51 {
         static EV_N: AtomicU64 = AtomicU64::new(0);
@@ -224,6 +239,11 @@ pub fn icu_raise_event(sys: &WasmSystem, event: u32) {
     if event == 0 {
         return;
     }
+    // NOTE: no log_event here - producers that drive event DMA (GPT)
+    // log directly with exact due times; logging here too would double
+    // every transfer (observed as 2x CCMPA counts starving nothing but
+    // doubling DMA work). Future DELSR users must log their own dues.
+    elc_route(sys, event);
     for (irq, slot) in IELSR_MIRROR.iter().enumerate() {
         let w = slot.load(Ordering::Relaxed);
         if w & 0x1FF == event {
@@ -288,6 +308,15 @@ pub struct DmaTransfer {
     pub peripheral: bool,
     pub pinc: bool, // PINC: increment the peripheral address per transfer
     pub p_size: usize, // peripheral data width in bytes (PSIZE)
+    /// Virtual timestamp (instruction_count) at which the unit becomes
+    /// due. 0 = immediate (legacy/STM32/toy flows). Event-driven RA DMAC
+    /// units carry their trigger's exact due time; the mem path defers
+    /// them so waveforms keep phase (a 48k-instruction tick holds many
+    /// baud periods - executing all at once would compress the wave and
+    /// break TX/RX pairing).
+    pub due: u64,
+    /// Event sequence (tiebreak after channel).
+    pub seq: u64,
 }
 
 impl DmaTransfer {
@@ -711,6 +740,165 @@ pub fn dtc_put(irq: u32, ch: DtcCh) {
     dtc_ch().lock().unwrap().insert(irq, ch);
 }
 
+// ── Peripheral event log (DMAC activation, ELC links) ─────────────────────
+// The DMAC drains activations synchronously: GPT compare/overflow edges
+// call dmac_notify with their exact virtual timestamp, which matches the
+// ICU DELSR activation sources and queues one transfer unit per armed
+// channel. ELC links are mirrored from the ELC peripheral (ELSR writes)
+// so routing needs no peripheral borrows in the raise path.
+static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
+// ELC event links, mirrored from RaElc ELSR writes (0xFFFF = no link).
+static ELC_LINKS: [AtomicU32; 32] = [const { AtomicU32::new(0xFFFF) }; 32];
+pub fn elc_set_link(peripheral: usize, event: u32) {
+    if peripheral < 32 {
+        ELC_LINKS[peripheral].store(event, Ordering::Relaxed);
+    }
+}
+// DMAC activation sources, mirrored from ICU DELSR writes (0xFFFF = none).
+static DELSR_MIRROR: [AtomicU32; 8] = [const { AtomicU32::new(0xFFFF) }; 8];
+pub fn delsr_set_link(channel: usize, event: u32) {
+    if channel < 8 {
+        DELSR_MIRROR[channel].store(event, Ordering::Relaxed);
+    }
+}
+pub fn delsr_event(channel: usize) -> u32 {
+    if channel < 8 {
+        DELSR_MIRROR[channel].load(Ordering::Relaxed)
+    } else {
+        0xFFFF
+    }
+}
+/// GPT channels whose compare/overflow events feed an armed DMAC
+/// activation link. The mem path advances exactly these timers every
+/// few instructions so event-driven DMA keeps phase even when the
+/// test driver ticks coarsely (a 48k-instruction tick holds ~10 baud
+/// periods at 9600).
+pub fn dmac_listened_gpt() -> Vec<u8> {
+    let mut out = Vec::new();
+    for ch in 0..8 {
+        let ev = DELSR_MIRROR[ch].load(Ordering::Relaxed);
+        if (87..151).contains(&ev) {
+            let g = ((ev - 87) / 8) as u8;
+            if !out.contains(&g) {
+                out.push(g);
+            }
+        }
+    }
+    out
+}
+/// Direct DMAC activation: match `event` against the DELSR links and
+/// queue one unit per armed channel with remaining count. Called
+/// synchronously from the raising timer (exact due time), so no
+/// pending queue or drain pass is needed. A channel with no remaining
+/// count ignores requests (silicon: DTE auto-clears at transfer end).
+pub fn dmac_notify(sys: &WasmSystem, event: u32, due: u64) {
+    if std::env::var("DMAEVLOG").is_ok() {
+        eprintln!("DMACNQ ev={} due={} now={}", event, due, instruction_count());
+    }
+    let seq = EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
+    for slot in sys.p.peripherals.iter() {
+        if slot.start != crate::peripherals::ra_dma::DMAC_BASE {
+            continue;
+        }
+        if let Ok(mut b) = slot.peripheral.try_borrow_mut() {
+            if let Some(d) = b
+                .as_any_mut()
+                .downcast_mut::<crate::peripherals::ra_dma::RaDmac>()
+            {
+                d.queue_event_unit(sys, event, due, seq);
+            }
+        }
+        break;
+    }
+}
+pub fn reset_event_routing() {
+    for l in ELC_LINKS.iter() {
+        l.store(0xFFFF, Ordering::Relaxed);
+    }
+    for d in DELSR_MIRROR.iter() {
+        d.store(0xFFFF, Ordering::Relaxed);
+    }
+}
+// DMAC event units queued-but-not-executed per channel. The mem path
+// decrements on execution; the DMAC completes a channel (DTE clear +
+// end event) on the tick after its last unit runs, so firmware
+// busy-waits observe completion only after the data has moved.
+static DMAC_OUTSTANDING: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+pub fn dmac_unit_queued(ch: usize) {
+    if ch < 8 {
+        DMAC_OUTSTANDING[ch].fetch_add(1, Ordering::Relaxed);
+    }
+}
+pub fn dmac_unit_done(ch: usize) {
+    if ch < 8 {
+        DMAC_OUTSTANDING[ch].fetch_sub(1, Ordering::Relaxed);
+    }
+}
+pub fn dmac_outstanding(ch: usize) -> u32 {
+    if ch < 8 {
+        DMAC_OUTSTANDING[ch].load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+// Route a raised event through the ELC links: any peripheral whose ELSR
+// selects this event gets its elc_signal hook (used for the GPT_A link
+// that starts/clears the SoftwareSerial RX timer on the pin edge).
+pub fn elc_route(sys: &WasmSystem, event: u32) {
+    for (p, link) in ELC_LINKS.iter().enumerate() {
+        if link.load(Ordering::Relaxed) == event {
+            sys.p.for_each_peripheral(&mut |peri| {
+                peri.elc_signal(sys, p as u32, event);
+            });
+        }
+    }
+}
+
+
+// ── GPT PWM output levels ───────────────────────────────────────────────────
+// Per-channel A/B output latches (GTIOR function 0: 0 on compare, 1 on
+// cycle end). PORT pins whose PFS selects a GPT function follow the
+// mapped channel (Arduino Minima PWM pin table below). Reset with the
+// globals; tests clear explicitly (register tests run no reset).
+static GPT_OUT: [[AtomicBool; 2]; 14] = [const { [const { AtomicBool::new(false) }; 2] }; 14];
+
+pub fn gpt_out_set(ch: usize, ab: usize, level: bool) {
+    if ch < 14 && ab < 2 {
+        GPT_OUT[ch][ab].store(level, Ordering::Relaxed);
+    }
+}
+pub fn gpt_out_reset() {
+    for ch in GPT_OUT.iter() {
+        for ab in ch.iter() {
+            ab.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Minima PWM-capable pins (from Arduino's own pinmux table): (port, pin)
+/// -> (GPT channel, A=0/B=1). Routed when the pin's PFS PSEL selects a
+/// GPT function (codes 0x02/0x03/0x14/0x15/0x16).
+pub const GPT_PWM_PINS: [((u8, u8), (usize, usize)); 32] = [
+    ((4, 0), (6, 0)), ((4, 1), (6, 1)), ((2, 13), (0, 0)), ((2, 12), (0, 1)),
+    ((4, 11), (6, 0)), ((4, 10), (6, 1)), ((4, 9), (5, 0)), ((4, 8), (5, 1)),
+    ((2, 5), (4, 0)), ((2, 4), (4, 1)), ((3, 4), (7, 0)), ((3, 3), (7, 1)),
+    ((3, 2), (4, 0)), ((3, 1), (4, 1)), ((3, 0), (0, 0)), ((1, 8), (0, 1)),
+    ((1, 9), (1, 0)), ((1, 10), (1, 1)), ((1, 11), (3, 0)), ((1, 12), (3, 1)),
+    ((1, 13), (2, 0)), ((1, 7), (0, 0)), ((1, 6), (0, 1)), ((1, 5), (1, 0)),
+    ((1, 4), (1, 1)), ((1, 3), (2, 0)), ((1, 2), (2, 1)), ((1, 1), (5, 0)),
+    ((1, 0), (5, 1)), ((5, 0), (2, 0)), ((5, 1), (2, 1)), ((5, 2), (3, 1)),
+];
+pub fn gpt_pwm_route(port: u8, pin: u8) -> Option<(usize, usize)> {
+    GPT_PWM_PINS.iter().find(|&&(p, _)| p == (port, pin)).map(|&(_, c)| c)
+}
+pub fn gpt_out_level(ch: usize, ab: usize) -> bool {
+    if ch < 14 && ab < 2 {
+        GPT_OUT[ch][ab].load(Ordering::Relaxed)
+    } else {
+        false
+    }
+}
+
 // ── Dataflash backing (8KB @ 0x40100000, erased 0xFF) ───────────────────────// Shared by the dataflash memory window and the FACI program/erase engine:
 // the FSP R_FLASH_LP driver programs through FACI while Arduino reads hit
 // the memory-mapped window directly. Reset restores the erased state.
@@ -962,6 +1150,43 @@ impl WasmSystem {
         }
     }
 
+    /// Due-time ordered take for the mem path: among MemCopy units whose
+    /// due time has arrived, pick the smallest (due bucket, channel,
+    /// sequence). The 64-instruction bucket absorbs trigger-to-execution
+    /// latency so coincident TX/RX requests order by DMAC fixed priority
+    /// (lower channel first = RX read-before-write on a bit boundary),
+    /// like silicon.
+    pub fn take_due_memcopy_dma_transfer(&self, now: u64) -> Option<DmaTransfer> {
+        let mut pending = self.pending_dma.borrow_mut();
+        let mut best: Option<usize> = None;
+        for (i, t) in pending.iter().enumerate() {
+            if t.direction != DmaDir::MemCopy || t.peripheral || t.due > now {
+                continue;
+            }
+            let key = (t.due >> 6, t.stream_idx, t.seq);
+            let is_best = match best {
+                None => true,
+                Some(b) => {
+                    let o = &pending[b];
+                    key < (o.due >> 6, o.stream_idx, o.seq)
+                }
+            };
+            if is_best {
+                best = Some(i);
+            }
+        }
+        best.map(|i| pending.remove(i))
+    }
+
+    /// True while any MemCopy unit is still queued (due or not) - the
+    /// mem path stays active instead of idling with future units left.
+    pub fn has_pending_memcopy(&self) -> bool {
+        self.pending_dma
+            .borrow()
+            .iter()
+            .any(|t| t.direction == DmaDir::MemCopy && !t.peripheral)
+    }
+
     pub fn mark_dma_completed(&self, stream_idx: usize, _success: bool) {
         DMA_COMPLETED[stream_idx].store(true, Ordering::Release);
         // Fire NVIC interrupt after transfer completes
@@ -1117,6 +1342,12 @@ pub fn reset_globals() {
     if let Some(m) = ADC_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = CTSU_OVERRIDES.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SCI_SPI_LOOPBACK.get() { m.lock().unwrap().clear(); }
+    gpt_out_reset();
+    crate::peripherals::ra_port::RaPort::soft_wire_reset();
+    reset_event_routing();
+    for d in DMAC_OUTSTANDING.iter() {
+        d.store(0, Relaxed);
+    }
     if let Some(m) = DTC_PENDING.get() { m.lock().unwrap().clear(); }
     if let Some(m) = DTC_CH.get() { m.lock().unwrap().clear(); }
     if let Some(m) = SD_ARMED.get() { m.lock().unwrap().clear(); }

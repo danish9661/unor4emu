@@ -53,6 +53,7 @@ pub mod ra_i2c;
 pub mod ra_spi;
 pub mod ra_icu;
 pub mod ra_flash;
+pub mod ra_ssi;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -90,6 +91,10 @@ pub trait Peripheral: std::any::Any {
     }
     fn tick(&mut self, _sys: &System) {}
     fn rx_byte(&mut self, _sys: &System, _byte: u8) {}
+    /// ELC link signal: the ELC routes `event` to peripheral link
+    /// `peripheral` (ELSR index). Default no-op; GPT starts/clears its
+    /// timer when link 0 (GPT_A) fires and GTSSR/GTCSR select it.
+    fn elc_signal(&mut self, _sys: &System, _peripheral: u32, _event: u32) {}
     /// JS driver called this after applying the queued FLASH erase to guest
     /// memory; default no-op, overridden by FLASH.
     fn flash_erase_applied(&mut self) {}
@@ -638,10 +643,14 @@ impl Peripherals {
         }
         // RA ICU (IELSR event routing) replaces the old accept stub.
         if let Some(x) = ra_icu::RaIcu::new() { add(0x4000_6000, 0x4000_6400, x); }
+        // RA KINT (key return interrupt -> KEY_INT event 69).
+        if let Some(x) = ra_icu::RaKint::new() { add(0x4008_0000, 0x4008_1000, x); }
         // RA ADC0/ADC1 + DAC + RTC
         if let Some(x) = ra_analog::RaAdc::new() { add(0x4005_C000, 0x4005_C200, x); }
         if let Some(x) = ra_analog::RaAdc::new() { add(0x4005_C200, 0x4005_C400, x); }
         if let Some(x) = ra_analog::RaDac::new() { add(0x4005_E000, 0x4005_E100, x); }
+        // RA DAC8 (8-bit, no Arduino consumer; retained + enable-gated).
+        if let Some(x) = ra_analog::RaDac8::new() { add(0x4009_E000, 0x4009_E100, x); }
         if let Some(x) = ra_rtc::RaRtc::new() { add(0x4004_4000, 0x4004_4200, x); }
         // RA DMAC + DTC + ELC + AGT0-1 + WDT/IWDT + CRC + DOC
         if let Some(x) = ra_dma::RaDmac::new_dmac() { add(0x4000_5000, 0x4000_5200, x); }
@@ -665,8 +674,14 @@ impl Peripherals {
         if let Some(x) = ra_opamp::RaAcmplp::new() { add(0x4008_5E00, 0x4008_5F00, x); }
         // RA CTSU (touch sensing: STRT->tick->counters + END event)
         if let Some(x) = ra_ctsu::RaCtsu::new() { add(0x4008_1000, 0x4008_1100, x); }
+        // RA SLCDC (segment LCD regs + display RAM; no panel).
+        if let Some(x) = ra_misc::RaSlcdc::new() { add(0x4008_2000, 0x4008_3000, x); }
+        // RA SSI0 (sound; bare-metal proven, Arduino I2S lib broken).
+        if let Some(x) = ra_ssi::RaSsi::new() { add(0x4004_E000, 0x4004_E100, x); }
         // RA CAN0 (mailbox CAN; CAN1 has no routable mailbox events here)
         if let Some(x) = ra_can::RaCan::new_can0() { add(0x4005_0000, 0x4005_1000, x); }
+        // CAN1: same mailboxes, no ELC event codes (polled only).
+        if let Some(x) = ra_can::RaCan::new_can1() { add(0x4005_1000, 0x4005_2000, x); }
         // RA IIC0-2 (RIIC master + virtual EEPROM slave at 0x50; IIC2 eventless)
         if let Some(x) = ra_i2c::RaIic::new_ch(0) { add(0x4005_3000, 0x4005_3100, x); }
         if let Some(x) = ra_i2c::RaIic::new_ch(1) { add(0x4005_3100, 0x4005_3200, x); }
@@ -708,6 +723,41 @@ impl Peripherals {
         let index = slots.binary_search_by_key(&addr, |p| p.start)
             .map_or_else(|e| e.checked_sub(1), |v| Some(v));
         index.map(|i| slots.get(i).filter(|p| addr <= p.end)).flatten()
+    }
+
+    /// Call `f` on every peripheral slot (used by ELC link routing).
+    /// Slots already borrowed (e.g. the peripheral raising the event)
+    /// are skipped via try_borrow_mut - never panic on reentry.
+    pub fn for_each_peripheral(&self, f: &mut dyn FnMut(&mut Box<dyn Peripheral>)) {
+        for slot in self.peripherals.iter() {
+            if let Ok(mut b) = slot.peripheral.try_borrow_mut() {
+                f(&mut *b);
+            }
+        }
+    }
+
+    /// Advance (tick) the given GPT channels. The mem path calls this
+    /// every few instructions for exactly the timers feeding armed DMAC
+    /// links, so event-driven DMA keeps phase when the test driver
+    /// ticks coarsely. Uses tick() (public via the trait) to avoid
+    /// reaching into channel internals.
+    pub fn advance_gpts(&self, sys: &System, channels: &[u8]) {
+        if channels.is_empty() {
+            return;
+        }
+        for slot in self.peripherals.iter() {
+            if !(0x4007_8000..0x4007_8E00).contains(&slot.start)
+                || (slot.start - 0x4007_8000) % 0x100 != 0
+            {
+                continue;
+            }
+            let ch = ((slot.start - 0x4007_8000) / 0x100) as u8;
+            if channels.contains(&ch) {
+                if let Ok(mut b) = slot.peripheral.try_borrow_mut() {
+                    b.tick(sys);
+                }
+            }
+        }
     }
 
     fn bitbanding(addr: u32) -> Option<(u32, u8)> {

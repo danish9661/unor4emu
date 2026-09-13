@@ -154,6 +154,8 @@ impl Stream {
             peripheral,
             pinc,
             p_size,
+            due: 0,
+            seq: 0,
         });
 
         log::debug!("{} queued DMA xfer stream={} dir={:?} src=0x{:08x} dst=0x{:08x} size={}",

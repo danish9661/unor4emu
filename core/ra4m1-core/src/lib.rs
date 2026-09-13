@@ -94,6 +94,14 @@ pub fn get_uart_output() -> String {
     take(&mut *system::get_uart_output().lock().unwrap())
 }
 
+/// Peek UART output WITHOUT consuming it (demo polling: the Rust proofs
+/// use `.contains("got=A5")` on the live buffer; draining here would
+/// eat the verdict before the check sees it).
+#[wasm_bindgen]
+pub fn peek_uart_output() -> String {
+    system::get_uart_output().lock().unwrap().clone()
+}
+
 /// Force an ADC channel to read `value` (14-bit) instead of the default.
 #[wasm_bindgen]
 pub fn adc_set_channel_value(channel: u32, value: u32) {
@@ -145,6 +153,17 @@ pub fn sd_read_block(block: u32) -> Vec<u8> {
 #[wasm_bindgen]
 pub fn icu_pin_edge(line: u8, falling: bool) -> bool {
     system::icu_pin_edge(sys(), line as usize, falling)
+}
+
+/// Wire a TX pin to an RX pin for the SoftwareSerial loopback demo
+/// (TX PODR changes mirror into RX PIDR + edge IRQ). Must be called
+/// after `init_ra4m1()` and before booting the `r4sser` firmware:
+/// `soft_wire(1, 4, 1, 5, 0)` = P104 (D3 TX) -> P105 (D2 RX, IRQ0).
+#[wasm_bindgen]
+pub fn soft_wire(tx_port: u8, tx_bit: u8, rx_port: u8, rx_bit: u8, irq_line: u8) {
+    crate::peripherals::ra_port::RaPort::soft_wire(
+        tx_port, tx_bit, rx_port, rx_bit, irq_line as usize,
+    );
 }
 
 #[wasm_bindgen]

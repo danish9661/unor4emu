@@ -20,7 +20,7 @@
   <div class="badges">
     <span class="badge">R7FA4M1AB3CFM</span>
     <span class="badge">Cortex-M4F @ 48MHz</span>
-    <span class="badge ok">184 proofs green</span>
+    <span class="badge ok">198 proofs green</span>
     <span class="badge" id="wasm-size">228 KB wasm</span>
   </div>
 </header>
@@ -66,6 +66,7 @@
       <div class="stat"><label>instructions</label><span id="stat-steps">0</span></div>
       <div class="stat"><label>PC</label><span id="stat-pc" class="mono">-</span></div>
       <div class="stat"><label>fault</label><span id="stat-fault" class="mono ok">none</span></div>
+      <div class="stat"><label>speed</label><span id="stat-mips" class="mono">-</span></div>
     </div>
     <div class="gpio">
       <div class="card-title small">GPIO &middot; live PORT output</div>
@@ -83,6 +84,15 @@
       <button class="tab" data-tab="sd" role="tab">SD</button>
       <button class="tab" data-tab="can" role="tab">CAN</button>
       <button class="tab" data-tab="eep" role="tab">EEPROM</button>
+      <button class="tab" data-tab="pwm" role="tab">PWM</button>
+      <button class="tab" data-tab="aw" role="tab">analogWrite</button>
+      <button class="tab" data-tab="tone" role="tab">tone</button>
+      <button class="tab" data-tab="sser" role="tab">SoftSerial</button>
+      <button class="tab" data-tab="rtc" role="tab">RTC</button>
+      <button class="tab" data-tab="ctsu" role="tab">CTSU</button>
+      <button class="tab" data-tab="hid" role="tab">HID</button>
+      <button class="tab" data-tab="matrix" role="tab">Matrix</button>
+      <button class="tab" data-tab="docs" role="tab">Docs</button>
     </div>
 
     <div class="tabpane active" id="pane-blink">
@@ -162,12 +172,146 @@
       <div id="eep-verdict" class="term small"></div>
     </div>
 
+    <div class="tabpane" id="pane-pwm">
+      <p class="desc">GPT0 PWM at 25% duty on D6 (P106): the pin follows the timer's compare output live — the grid cell blinks and the measured duty is shown. An LED cannot show duty, so the numbers are the verdict.</p>
+      <div class="row">
+        <button id="btn-pwm-run" class="btn-acc">Run PWM demo</button>
+      </div>
+      <ol id="pwm-steps" class="enum"></ol>
+      <div id="pwm-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-aw">
+      <p class="desc">Real ArduinoCore <span class="mono">analogWrite(6, 64)</span> on GPT0 (490&nbsp;Hz, 8-bit): the sketch hits <span class="mono">R_GPT_DutyCycleSet</span>, which programs the GTCCRD buffer with GTBER transfer — the live GTPR/GTCCRB/GTIOR below are the verdict (bare-metal duty waveform is measured in the PWM tab).</p>
+      <div class="row">
+        <button id="btn-aw-run" class="btn-acc">Run analogWrite demo</button>
+      </div>
+      <ol id="aw-steps" class="enum"></ol>
+      <div id="aw-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-tone">
+      <p class="desc">Real ArduinoCore <span class="mono">tone(LED_BUILTIN, 440)</span>: an FspTimer in PERIODIC mode toggles D13 from its overflow IRQ. The LED and grid cell follow live — the toggle is the verdict.</p>
+      <div class="row">
+        <button id="btn-tone-run" class="btn-acc">Run tone demo</button>
+      </div>
+      <ol id="tone-steps" class="enum"></ol>
+      <div id="tone-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-sser">
+      <p class="desc">Real ArduinoCore <span class="mono">SoftwareSerial</span> loopback at 9600 baud: TX on D3 (P104) is wired on-page to RX on D2 (P105, IRQ0); GPT4/GPT5 timers plus DMAC0/DMAC1 move one PCNTR sample per half-bit. The sketch sends <span class="mono">0xA5</span> and prints <span class="mono">got=A5</span> on Serial1 — the terminal below shows it.</p>
+      <div class="row">
+        <button id="btn-sser-run" class="btn-acc">Run SoftSerial demo</button>
+      </div>
+      <ol id="sser-steps" class="enum"></ol>
+      <div id="sser-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-rtc">
+      <p class="desc">Real-time clock on real FSP: the sketch sets 11:59:58 and the core ticks seconds. The clock below is read live from the BCD counters — watch it roll over to 12:00.</p>
+      <div class="row">
+        <button id="btn-rtc-run" class="btn-acc">Run RTC demo</button>
+      </div>
+      <div id="rtc-clock" class="term small">--:--:--</div>
+      <ol id="rtc-steps" class="enum"></ol>
+      <div id="rtc-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-ctsu">
+      <p class="desc">Capacitive touch in mutual mode (RX ch5 / TX ch3): trigger, read the sensor + reference counters live, compare against the deterministic default. No touch hardware needed.</p>
+      <div class="row">
+        <button id="btn-ctsu-run" class="btn-acc">Run CTSU demo</button>
+      </div>
+      <ol id="ctsu-steps" class="enum"></ol>
+      <div id="ctsu-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-hid">
+      <p class="desc">USB HID keyboard through real TinyUSB: enumerate (CDC+HID), read the boot-keyboard report descriptor, send SET_IDLE — then the sketch's 'a' key report arrives on the interrupt pipe and the key shows below.</p>
+      <div class="row">
+        <button id="btn-hid-run" class="btn-acc">Enumerate HID keyboard</button>
+      </div>
+      <ol id="hid-steps" class="enum"></ol>
+      <div id="hid-key" class="term small">-</div>
+      <div id="hid-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-matrix">
+      <p class="desc">12&times;8 LED matrix, charlieplexed on real GPIO (the same 11 pins as hardware): the sketch multiplexes a smiley faster than the eye. The grid below accumulates lit LEDs with persistence — like vision does. No panel on Minima; the pattern is the verdict.</p>
+      <div class="row">
+        <button id="btn-matrix-run" class="btn-acc">Run Matrix demo</button>
+      </div>
+      <div id="matrix-grid" class="matrix-grid"></div>
+      <ol id="matrix-steps" class="enum"></ol>
+      <div id="matrix-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-docs">
+      <p class="desc">What this emulator covers: every row is a feature of the Arduino UNO R4 Minima variant (RA4M1), whether the silicon has it, what the emulator does with it, and how it is proven. Full proofs live in the repo (<span class="mono">cargo test</span>, 198 + 70 green).</p>
+      <div class="doctable-wrap"><table class="doctable">
+        <thead><tr><th>Feature</th><th>Minima HW</th><th>Status</th><th>Proof / note</th></tr></thead>
+        <tbody>
+        <tr><td>Cortex-M4F CPU</td><td>yes</td><td class="st-done">Done</td><td>128 legacy decoder tests</td></tr>
+        <tr><td>NVIC / SysTick / SCB / MPU / FPU</td><td>yes</td><td class="st-done">Done</td><td>reused ARM models; VTOR keeps bits[31:7]</td></tr>
+        <tr><td>SYSTEM / MSTP / ICU / ELC</td><td>yes</td><td class="st-done">Done</td><td>IELSR routing incl. DTCE; pin-edge injection</td></tr>
+        <tr><td>PORT + PFS GPIO</td><td>yes</td><td class="st-done">Done</td><td>real PCNTR layout; live grid on this page</td></tr>
+        <tr><td>attachInterrupt</td><td>yes</td><td class="st-done">Done</td><td>all 16 lines, button-sketch proof</td></tr>
+        <tr><td>SCI0-9 UART</td><td>yes</td><td class="st-done">Done</td><td>byte-exact; Serial + Serial1 (SCI2) proofs</td></tr>
+        <tr><td>SCI simple-SPI</td><td>yes</td><td class="st-done">Done</td><td>shift + loopback jig</td></tr>
+        <tr><td>SPI0/1 master</td><td>yes (D11-13 = ch1)</td><td class="st-done">Done</td><td>polled SPRF + loopback; SPI tab</td></tr>
+        <tr><td>SPI slave</td><td>mode</td><td class="st-done">Done</td><td>MSTR=0 staging + exchange; SPI tab</td></tr>
+        <tr><td>Virtual SD (SPI mode)</td><td>card-dependent</td><td class="st-done">Done</td><td>CMD0/8/55/41/58/17/24; SD tab + MBR dump</td></tr>
+        <tr><td>I2C master</td><td>yes (Wire = IIC1)</td><td class="st-done">Done</td><td>EEPROM slave @0x50; Wire tab</td></tr>
+        <tr><td>I2C slave</td><td>mode</td><td class="st-done">Done</td><td>shared-bus fabric; Wire tab</td></tr>
+        <tr><td>GPT0-13</td><td>yes</td><td class="st-done">Done</td><td>real offsets; wrap/compare/overflow events</td></tr>
+        <tr><td>GPT PWM output</td><td>yes (D3/D5/D6/D9/D10/D11)</td><td class="st-done">Done</td><td>GTIO function 0 via PFS; 25% duty on D6; PWM tab</td></tr>
+        <tr><td>AGT0-5</td><td>yes</td><td class="st-done">Done</td><td>1 ms IRQs drive millis() in Blink</td></tr>
+        <tr><td>ADC14 / DAC12 / RTC+alarm</td><td>yes</td><td class="st-done">Done</td><td>convert, retained output, BCD rollover + event 38</td></tr>
+        <tr><td>DMAC memcopy / DTC repeat</td><td>yes</td><td class="st-done">Done</td><td>sync path; GPT-&gt;DAC firmware proof</td></tr>
+        <tr><td>WDT / IWDT</td><td>yes</td><td class="st-done">Done</td><td>refresh-holds + expiry-latches proofs</td></tr>
+        <tr><td>CRC / DOC / OPAMP / ACMP</td><td>yes</td><td class="st-done">Done</td><td>IEEE-802.3, follower + compare</td></tr>
+        <tr><td>USBFS CDC serial</td><td>yes (native USB)</td><td class="st-done">Done</td><td>enumerate / hello / echo; Serial + Echo tabs</td></tr>
+        <tr><td>USB HID keyboard</td><td>yes</td><td class="st-done">Done</td><td>report descriptor + INT-IN report proof</td></tr>
+        <tr><td>USB suspend / resume</td><td>yes</td><td class="st-done">Done</td><td>DVSQ SUSPx, RESM, weak-callback proof</td></tr>
+        <tr><td>CTSU self + mutual touch</td><td>yes</td><td class="st-done">Done</td><td>counters + END event</td></tr>
+        <tr><td>CAN0 mailbox + FIFO + errors</td><td>yes (CAN1: no events)</td><td class="st-done">Done</td><td>loopback, MB24 FIFO, isError proof; CAN tab</td></tr>
+        <tr><td>analogWrite (GPT0 PWM API)</td><td>yes (D6 = GTIOCB)</td><td class="st-done">Done</td><td>GTCCRD buffer + GTBER transfer; analogWrite tab</td></tr>
+        <tr><td>tone() (GPT PERIODIC IRQ)</td><td>yes</td><td class="st-done">Done</td><td>440 Hz toggle on D13; tone tab</td></tr>
+        <tr><td>SoftwareSerial 9600 loopback</td><td>lib (GPIO+GPT+DMAC)</td><td class="st-done">Done</td><td>0xA5 TX→RX via soft wire; SoftSerial tab</td></tr>
+        <tr><td>CAN1 mailbox</td><td>yes (no ELC events)</td><td class="st-done">Done</td><td>polled self-test loopback proof</td></tr>
+        <tr><td>DAC8 8-bit</td><td>yes (no Arduino API)</td><td class="st-done">Done</td><td>retain + DAM gate proof</td></tr>
+        <tr><td>TSN calibration</td><td>yes</td><td class="st-done">Done</td><td>fixed trim constants proof</td></tr>
+        <tr><td>SLCDC segment LCD</td><td>yes (no panel)</td><td class="st-done">Done</td><td>regs + 64B display RAM proof</td></tr>
+        <tr><td>KINT key interrupt</td><td>yes</td><td class="st-done">Done</td><td>key-press jig into event 69 + proof</td></tr>
+        <tr><td>SSI0 audio FIFO</td><td>yes (I2S lib broken)</td><td class="st-done">Done</td><td>TX drain + RX pattern proof</td></tr>
+        <tr><td>LED matrix 12x8</td><td>GPIO-driven</td><td class="st-done">Done</td><td>charlieplex render; smiley proof + Matrix tab</td></tr>
+        <tr><td>Dataflash 8KB + FACI</td><td>yes</td><td class="st-done">Done</td><td>program/erase/blankcheck; EEPROM tab</td></tr>
+        <tr><td>Arduino EEPROM lib</td><td>via dataflash</td><td class="st-done">Done</td><td>round-trip proof; EEPROM tab</td></tr>
+        <tr><td>I2S audio (SSI)</td><td>no driver</td><td class="st-no">Left</td><td>in-tree I2S lib does not compile (no r_i2s_api.h)</td></tr>
+        <tr><td>USB MSC storage</td><td>no</td><td class="st-no">Left</td><td>no Arduino lib; CFG_TUD_MSC=0</td></tr>
+        <tr><td>FAT / LittleFS on-chip</td><td>constrained</td><td class="st-no">Left</td><td>FAT needs ≥32KB; LFS metadata exceeds 8KB dataflash</td></tr>
+        <tr><td>SDHI 4-bit SD host</td><td>no (not on RA4M1)</td><td class="st-no">Left</td><td>no peripheral; SDCard lib unpackaged</td></tr>
+        <tr><td>CAN1 mailbox</td><td>yes (no ELC events)</td><td class="st-done">Done</td><td>polled self-test loopback proof</td></tr>
+        <tr><td>DAC8 8-bit</td><td>yes (no Arduino API)</td><td class="st-done">Done</td><td>retain + DAM gate proof</td></tr>
+        <tr><td>TSN calibration</td><td>yes</td><td class="st-done">Done</td><td>fixed trim constants proof</td></tr>
+        <tr><td>SLCDC segment LCD</td><td>yes (no panel)</td><td class="st-done">Done</td><td>regs + 64B display RAM proof</td></tr>
+        <tr><td>KINT key interrupt</td><td>yes</td><td class="st-done">Done</td><td>key-press jig into event 69 + proof</td></tr>
+        <tr><td>SSI0 audio FIFO</td><td>yes (I2S lib broken)</td><td class="st-done">Done</td><td>TX drain + RX pattern proof</td></tr>
+        <tr><td>LED matrix 12x8</td><td>GPIO-driven</td><td class="st-done">Done</td><td>charlieplex render; smiley proof + Matrix tab</td></tr>
+        <tr><td>WiFi / ESP32-S3</td><td>WiFi board only</td><td class="st-part">Parked</td><td>waiting on S3 code</td></tr>
+        <tr><td>CAN1 / DAC8 / TSN / LCD / KINT</td><td>no / unused</td><td class="st-part">Unmapped</td><td>deliberate; Arduino boot touches none</td></tr>
+        </tbody>
+      </table></div>
+      <p class="desc">Verify locally: <span class="mono">cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1</span> and the small core likewise. Every Demo tab above replays its proof firmware live in this page.</p>
+    </div>
+
     <div id="banner" class="banner hidden"></div>
   </section>
 </main>
 
 <footer>
-  <span>RA4M1 peripheral models proven against arduino-cli firmware (184 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (198 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
 </footer>
 
 <script type="module" src="app.js"></script>

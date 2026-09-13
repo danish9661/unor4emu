@@ -7,16 +7,26 @@ use super::Peripheral;
 // All accept-and-model: ELC dispatches link events, AGT counts, WDT/IWDT
 // raise the shared watchdog flags, CRC/DOC compute.
 
-// ---- ELC: 32 link-select regs + software event gen ----
+// ---- ELC: real layout (R7FA4M1AB.h): ELCR+0x00, ELSEGR[2]+0x02,
+// ELSR[23]+0x10 (16-bit HA each, stride 4, ELS = low 9 bits).
+// ELSR writes mirror to the shared link table so icu_raise_event can
+// route without peripheral borrows; ELSEGR software events (83/84)
+// route through the same path. (An earlier revision used fictional
+// offsets; remapped when SoftwareSerial needed real R_ELC_LinkSet.)
 pub struct RaElc {
+    elcr: u32,
     elsr: [u32; 32],
-    elsegr: u32,
-    fired: u32, // bitmask of software-fired links (test-visible)
 }
 
 impl RaElc {
     pub fn new() -> Option<Box<dyn Peripheral>> {
-        Some(Box::new(Self { elsr: [0; 32], elsegr: 0, fired: 0 }))
+        Some(Box::new(Self { elcr: 0, elsr: [0; 32] }))
+    }
+    fn set_elsr(&mut self, n: usize, event: u32) {
+        if n < 32 {
+            self.elsr[n] = event & 0x1FF;
+            crate::system::elc_set_link(n, event & 0x1FF);
+        }
     }
 }
 
@@ -24,31 +34,61 @@ impl Peripheral for RaElc {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, _sys: &System, offset: u32) -> u32 {
         match offset {
-            0x00..=0x7C => self.elsr[(offset / 4) as usize],
-            0x80 => self.elsegr,
-            0x84 => self.fired,
+            0x00 => self.elcr,
+            0x10..=0x8C => {
+                let n = ((offset - 0x10) / 4) as usize;
+                if (offset - 0x10) % 4 < 2 { self.elsr[n] } else { 0 }
+            }
             _ => 0,
         }
     }
     fn write(&mut self, sys: &System, offset: u32, value: u32) {
+        // Word-path entry (also used by write_sized below after the
+        // target bytes are merged into their 16-bit halves).
         match offset {
-            0x00..=0x7C => self.elsr[(offset / 4) as usize] = value & 0xFF,
-            0x80 => {
-                // Software event: each set bit fires its link.
-                self.elsegr = value;
-                for i in 0..6u32 {
-                    if value & (1 << i) != 0 {
-                        self.fired |= 1 << i;
-                        // Direct dispatch MVP: linked GPT start + ADC start.
-                        // Link target encoding follows FSP ELSR values loosely:
-                        // any nonzero ELSR on this index means "armed".
-                        if self.elsr[i as usize] != 0 {
-                            sys.p.nvic.borrow_mut().set_intr_pending(60 + i as i32);
-                        }
-                    }
+            0x00 => self.elcr = value & 0xFF,
+            0x10..=0x8C => {
+                let n = ((offset - 0x10) / 4) as usize;
+                if (offset - 0x10) % 4 == 0 {
+                    self.set_elsr(n, value & 0x1FF);
                 }
             }
             _ => {}
+        }
+        let _ = sys;
+    }
+    fn write_sized(&mut self, sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        // Byte-exact: ELSEGR lives at bytes 2-3 of the +0x00 word and
+        // ELSR halves at 4n-aligned slots.
+        for i in 0..size as u32 {
+            let addr = offset + byte_offset as u32 + i;
+            let b = ((value >> (8 * (byte_offset as u32 + i))) & 0xFF) as u32;
+            match addr {
+                0x00 => self.elcr = b,
+                0x02 | 0x03 => {
+                    // ELSEGRn: SEG b0 fires software event n (WE b6
+                    // gates it on silicon; accept SEG alone, like the
+                    // old model, since FSP always sets both).
+                    if b & 1 != 0 {
+                        let ev = 83 + (addr - 0x02);
+                        crate::system::elc_route(sys, ev);
+                    }
+                }
+                0x10..=0x8D => {
+                    let n = ((addr - 0x10) / 4) as usize;
+                    let half = (addr - 0x10) % 4;
+                    if half < 2 {
+                        let cur = self.elsr[n];
+                        let nv = if half == 0 {
+                            (cur & 0x1F00) | b
+                        } else {
+                            (cur & 0xFF) | ((b & 1) << 8)
+                        };
+                        self.set_elsr(n, nv);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -172,13 +212,15 @@ impl Peripheral for RaAgt {
 }
 
 // ---- WDT / IWDT: countdown + shared reset flags ----
+// WDTCR+0x02 TOPS[1:0] programs the virtual period (one tick ~= one
+// test chunk here, not wall time); any WDTRR write refreshes to it.
 pub struct RaWdt {
-    wdtrr: u8, wdtsr: u16, down: u32,
+    wdtrr: u8, wdtsr: u16, down: u32, reload: u32,
 }
 
 impl RaWdt {
     pub fn new() -> Option<Box<dyn Peripheral>> {
-        Some(Box::new(Self { wdtrr: 0, wdtsr: 0, down: 1_000_000 }))
+        Some(Box::new(Self { wdtrr: 0, wdtsr: 0, down: 1_000_000, reload: 1_000_000 }))
     }
 }
 
@@ -200,14 +242,37 @@ impl Peripheral for RaWdt {
             _ => 0,
         }
     }
-    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
-        match offset {
-            0x00 => {
-                self.wdtrr = (value & 0xFF) as u8;
-                self.down = 1_000_000; // refresh
-                self.wdtsr &= !(1 << 7);
+    fn write(&mut self, sys: &System, offset: u32, value: u32) {
+        self.write_sized(sys, offset, value, 0, 4);
+    }
+    fn write_sized(&mut self, _sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        // Real layout: WDTRR+0x00, WDTCR+0x02, WDTSR+0x04. The bus hands
+        // merged words, so dispatch per byte (a WDTCR config write must
+        // not look like a WDTRR refresh).
+        let base = (offset & !3) as usize;
+        for i in 0..size as usize {
+            if byte_offset as usize + i >= 4 { continue; }
+            let idx = base + byte_offset as usize + i;
+            let v = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
+            match idx {
+                0x00 => {
+                    self.wdtrr = v;
+                    self.down = self.reload; // refresh
+                    self.wdtsr &= !(1 << 7);
+                }
+                0x02 => {
+                    // WDTCR TOPS[1:0] programs the virtual period (ticks
+                    // here scale like test chunks, monotonic in timeout).
+                    self.reload = match v & 3 {
+                        0 => 64,
+                        1 => 256,
+                        2 => 1024,
+                        _ => 4096,
+                    };
+                    self.down = self.reload;
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }
@@ -285,6 +350,47 @@ impl Peripheral for RaDoc {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+// RA SLCDC (segment LCD, real base 0x40082000): LCDM0+0x00, LCDM1+0x01,
+// LCDC0+0x02, VLCD+0x03, SEG[64]+0x100 display RAM. No LCD panel on
+// Minima and no Arduino consumer: configuration + display RAM retain,
+// readable back. A panel would scan SEG on COM timing (unmodeled).
+pub struct RaSlcdc {
+    regs: [u8; 0x140],
+}
+
+impl RaSlcdc {
+    pub fn new() -> Option<Box<dyn Peripheral>> {
+        Some(Box::new(Self { regs: [0; 0x140] }))
+    }
+}
+
+impl Peripheral for RaSlcdc {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+        let o = (offset & !3) as usize;
+        if o + 4 > 0x140 {
+            return 0;
+        }
+        u32::from_le_bytes([self.regs[o], self.regs[o + 1], self.regs[o + 2], self.regs[o + 3]])
+    }
+    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+        self.write_sized(_sys, offset, value, 0, 4);
+    }
+    fn write_sized(&mut self, _sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        let base = (offset & !3) as usize;
+        for i in 0..size as usize {
+            if byte_offset as usize + i >= 4 {
+                continue;
+            }
+            let idx = base + byte_offset as usize + i;
+            if idx >= 0x140 {
+                continue;
+            }
+            self.regs[idx] = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
         }
     }
 }

@@ -15,5 +15,7 @@ mkdir -p demo/pkg demo/fw
 cp core/blinky/r4blink.bin core/blinky/r4serial.bin core/blinky/r4echo.bin \
    core/blinky/r4wire.bin core/blinky/r4spi.bin core/blinky/r4wire1.bin \
    core/blinky/r4spislv.bin core/blinky/r4sd.bin core/blinky/r4canfifo.bin \
-   core/blinky/r4eep.bin demo/fw/
+   core/blinky/r4eep.bin core/blinky/r4pwm.bin core/blinky/r4matrix.bin \
+   core/blinky/r4rtc.bin core/blinky/r4ctsu.bin core/blinky/r4hid.bin \
+   core/blinky/r4aw.bin core/blinky/r4tone.bin core/blinky/r4sser.bin demo/fw/
 ls -la demo/pkg demo/fw | head -n 20

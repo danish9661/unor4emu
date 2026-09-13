@@ -127,6 +127,19 @@ h1 span { color: var(--teal); font-weight: 600; }
 .enum li::before { content: "○"; position: absolute; left: 4px; color: var(--dim); }
 .enum li.run { color: var(--ink); } .enum li.run::before { content: "◌"; color: var(--amber); }
 .enum li.done { color: var(--green); } .enum li.done::before { content: "●"; color: var(--green); }
+.matrix-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 5px; max-width: 340px; margin: 0 0 12px; }
+.matrix-grid .mx { aspect-ratio: 1; border-radius: 50%; background: #182633; transition: background 0.08s, box-shadow 0.08s; }
+.matrix-grid .mx.hi { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+.doctable-wrap { overflow-x: auto; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 10px; }
+.doctable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.doctable th, .doctable td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.doctable thead th { color: var(--dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; background: var(--panel2); }
+.doctable tbody tr:last-child td { border-bottom: none; }
+.doctable td:nth-child(2), .doctable td:nth-child(3) { white-space: nowrap; }
+.doctable .st-done { color: var(--green); font-weight: 700; }
+.doctable .st-part { color: var(--amber); font-weight: 700; }
+.doctable .st-no { color: var(--dim); font-weight: 700; }
+.doctable td:nth-child(4) { color: var(--dim); }
 .textin {
   flex: 1; background: #05080c; border: 1px solid var(--line); color: var(--ink);
   border-radius: 10px; padding: 10px 12px; font-family: var(--mono); font-size: 13px;

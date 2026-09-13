@@ -51,7 +51,7 @@ jobs:
           test -f demo/index.html
           test -f demo/pkg/uno_r4_minima_wasm_bg.wasm
           test -f demo/pkg/uno_r4_minima_wasm.js
-          for f in r4blink.bin r4serial.bin r4echo.bin r4wire1.bin r4spislv.bin r4sd.bin r4canfifo.bin r4eep.bin; do
+          for f in r4blink.bin r4serial.bin r4echo.bin r4wire1.bin r4spislv.bin r4sd.bin r4canfifo.bin r4eep.bin r4pwm.bin r4rtc.bin r4ctsu.bin r4hid.bin r4aw.bin r4tone.bin r4sser.bin; do
             test -f demo/fw/$f || (echo "missing demo/fw/$f" && exit 1)
           done
           ls -la demo/pkg demo/fw

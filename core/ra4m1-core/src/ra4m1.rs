@@ -22,6 +22,7 @@ pub const RTC_BASE: u32 = 0x4004_4000;
 pub const DMAC_BASE: u32 = 0x4000_5000;
 pub const DTC_BASE: u32 = 0x4000_5400;
 pub const ELC_BASE: u32 = 0x4004_1000;
+pub const ICU_BASE: u32 = 0x4000_6000;
 pub const AGT0_BASE: u32 = 0x4008_4000;
 pub const CRC_BASE: u32 = 0x4007_4000;
 pub const DOC_BASE: u32 = 0x4005_4100;
@@ -29,6 +30,11 @@ pub const OPAMP_BASE: u32 = 0x4008_6000;
 pub const ACMPLP_BASE: u32 = 0x4008_5E00;
 pub const CTSU_BASE: u32 = 0x4008_1000;
 pub const CAN0_BASE: u32 = 0x4005_0000;
+pub const CAN1_BASE: u32 = 0x4005_1000;
+pub const DAC8_BASE: u32 = 0x4009_E000;
+pub const SLCDC_BASE: u32 = 0x4008_2000;
+pub const KINT_BASE: u32 = 0x4008_0000;
+pub const SSI0_BASE: u32 = 0x4004_E000;
 pub const IIC0_BASE: u32 = 0x4005_3000;
 pub const IIC1_BASE: u32 = 0x4005_3100;
 pub const SPI0_BASE: u32 = 0x4007_2000;
@@ -133,14 +139,22 @@ mod tests {
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
         let sys = crate::sys();
-        // Period 100, start.
-        sys.p.write(sys, GPT0_BASE + 0x08, 4, 100);
-        sys.p.write(sys, GPT0_BASE + 0x00, 4, 1);
+        // Period 100, start via GTCR.CST (real offsets: GTPR+0x64,
+        // GTCR+0x2C, GTCNT+0x48).
+        sys.p.write(sys, GPT0_BASE + 0x64, 4, 100);
+        sys.p.write(sys, GPT0_BASE + 0x2C, 4, 1);
         // Advance virtual clock and tick.
         crate::system::INSTRUCTION_COUNT.fetch_add(50, std::sync::atomic::Ordering::Relaxed);
         sys.tick();
-        let cnt = sys.p.read(sys, GPT0_BASE + 0x04, 4);
+        let cnt = sys.p.read(sys, GPT0_BASE + 0x48, 4);
         assert!(cnt > 0 && cnt <= 100, "cnt={}", cnt);
+        // GTSTR software-start also runs the counter.
+        sys.p.write(sys, GPT0_BASE + 0x2C, 4, 0);
+        sys.p.write(sys, GPT0_BASE + 0x48, 4, 0);
+        sys.p.write(sys, GPT0_BASE + 0x04, 4, 1); // GTSTR
+        crate::system::INSTRUCTION_COUNT.fetch_add(50, std::sync::atomic::Ordering::Relaxed);
+        sys.tick();
+        assert!(sys.p.read(sys, GPT0_BASE + 0x48, 4) > 0, "GTSTR start");
     }
 
     #[test]
@@ -238,42 +252,455 @@ mod tests {
         assert_eq!(sys.p.read(sys, DAC_BASE + 0x00, 4) & 0xFFF, 0x7FF);
     }
 
+
+
     #[test]
     fn ra4m1_map_rtc_ticks_seconds() {
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
         let sys = crate::sys();
-        sys.p.write(sys, RTC_BASE + 0x0E, 1, 1); // START (RCR2 is 8-bit)
-        sys.p.write(sys, RTC_BASE + 0x00, 1, 0); // sec=0
+        sys.p.write(sys, RTC_BASE + 0x24, 1, 1); // START (RCR2 b0)
+        sys.p.write(sys, RTC_BASE + 0x02, 1, 0); // sec=0
         crate::system::INSTRUCTION_COUNT.fetch_add(480_000 * 3, std::sync::atomic::Ordering::Relaxed);
         sys.tick();
-        let s = sys.p.read(sys, RTC_BASE + 0x00, 1);
+        let s = sys.p.read(sys, RTC_BASE + 0x02, 1);
         assert!(s >= 2 && s <= 4, "sec={}", s);
     }
 
     #[test]
     fn ra4m1_map_rtc_alarm() {
-        // RTC alarm: second-alarm at :00 raises ELC event 38, routed
-        // here to IRQ5. Stepped second by second so the match instant
-        // is observed (a multi-second jump would skip it).
+        // RTC alarm: second-alarm at :00 with RCR1.AIE raises ELC event
+        // 38, routed here to IRQ5. Time starts at :58; three virtual
+        // seconds cross the match.
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
         let sys = crate::sys();
         sys.p.write(sys, 0x4000_6300 + 5 * 4, 4, 38); // IELSR5 = RTC_ALARM
         sys.p.write(sys, 0xE000_E100, 4, 1 << 5);     // ISER0: IRQ5
-        sys.p.write(sys, RTC_BASE + 0x0E, 1, 1);      // START
-        sys.p.write(sys, RTC_BASE + 0x00, 1, 58);     // sec=58
-        sys.p.write(sys, RTC_BASE + 0x02, 1, 0);      // min=0
-        sys.p.write(sys, RTC_BASE + 0x04, 1, 0);      // hr=0
-        sys.p.write(sys, RTC_BASE + 0x10, 4, 0x0001_00); // ALRM = 00:01:00 (min rolls at :00)
-        sys.p.write(sys, RTC_BASE + 0x14, 1, 7);      // ALMEN: all fields
+        sys.p.write(sys, RTC_BASE + 0x24, 1, 1);      // START (RCR2 b0)
+        sys.p.write(sys, RTC_BASE + 0x02, 1, 0x58);   // sec=58 BCD
+        sys.p.write(sys, RTC_BASE + 0x10, 1, 0x80);   // RSECAR: ENB + :00
+        sys.p.write(sys, RTC_BASE + 0x22, 1, 0x01);   // RCR1.AIE
+        // Step second by second: the alarm is evaluated against the
+        // current second on each tick, so a multi-second jump would
+        // skip the :00 match the way HW would miss a late check.
         for _ in 0..4 {
             crate::system::INSTRUCTION_COUNT.fetch_add(480_000, std::sync::atomic::Ordering::Relaxed);
             sys.tick();
         }
         assert!(sys.p.nvic.borrow().has_pending(), "ALARM event pending");
+    }
+
+    #[test]
+    fn ra4m1_rtc_firmware() {
+        // End-to-end RTC on real FSP: the sketch sets 11:59:58, the core
+        // advances ~4 virtual seconds, MMIO reads show the BCD rollover
+        // to 12:00:0x. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        const RTC: u32 = 0x4004_4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4rtc.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        // Wait for a minute rollover with seconds wrapping to 0
+        // (proves the BCD second->minute carry on real FSP-set time,
+        // whatever wall phase the boot landed in).
+        let m0 = sys.p.read(sys, RTC + 0x04, 1) & 0xFF;
+        let mut ok = false;
+        for _ in 0..800 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            let sec = sys.p.read(sys, RTC + 0x02, 1) & 0xFF;
+            let min = sys.p.read(sys, RTC + 0x04, 1) & 0xFF;
+            let hr = sys.p.read(sys, RTC + 0x06, 1) & 0xFF;
+            assert!(hr <= 0x23 && (hr & 0x0F) <= 9, "hr BCD {:02x}", hr);
+            if min != m0 && sec == 0x00 {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "no minute rollover");
+    }
+
+    #[test]
+    fn ra4m1_wdt_refresh() {
+        // End-to-end WDT refresh on real FSP: the sketch refreshes every
+        // 10ms forever; over >> one maximum period no reset may latch.
+        // No USB involved; the verdict is the model reset flag.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4wdtref.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        for _ in 0..5000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        }
+        assert!(!crate::system::is_watchdog_reset_requested(), "reset despite refresh");
+    }
+
+    #[test]
+    fn ra4m1_wdt_expire() {
+        // End-to-end WDT timeout on real FSP: the sketch starts the
+        // watchdog and never refreshes; the reset flag must latch.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4wdtexp.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let mut fired = false;
+        for _ in 0..6000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if crate::system::is_watchdog_reset_requested() {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired, "no watchdog reset without refresh");
+    }
+
+    #[test]
+    fn ra4m1_can_ok() {
+        // End-to-end CAN self-test on real FSP + Arduino_CAN: enumerate
+        // for the Serial verdict channel (the sketch pokes TCR loopback
+        // itself), run the loop, expect "can-ok" in the bulk capture.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4can.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        usb_enumerate_cdc(sys, &mut mem, &mut cpu);
+
+        // The sketch sends + receives once in setup(), then idles.
+        let mut all = Vec::new();
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            all.extend(usb_take_tx(sys));
+            if all.windows(6).any(|w| w == b"can-ok" || w == b"can-ng") {
+                break;
+            }
+        }
+        let s = String::from_utf8_lossy(&all);
+        assert!(s.contains("can-ok"), "no can-ok in {:?}..", &all[..all.len().min(64)]);
+    }
+
+    #[test]
+    fn ra4m1_spi_ok() {
+        // End-to-end SPI loopback on real FSP r_spi (Arduino drives
+        // RSPI0 polled): enumerate the SPI sketch, arm the loopback jig
+        // on SPI0, expect "spi-ok" (transfer(A5/5A/00) echoes).
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4spi.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        usb_enumerate_cdc(sys, &mut mem, &mut cpu);
+
+        // The sketch idles 200ms after SPI.begin: arm the RSPI
+        // loopback jig (D11/D12/D13 probe to channel 1 = SPI1),
+        // then collect the verdict.
+        crate::system::sci_set_spi_loopback(SPI1_BASE, true);
+        let mut all = Vec::new();
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            all.extend(usb_take_tx(sys));
+            if all.windows(6).any(|w| w == b"spi-ok" || w == b"spi-ng") {
+                break;
+            }
+        }
+        let s = String::from_utf8_lossy(&all);
+        crate::system::sci_set_spi_loopback(SPI1_BASE, false);
+        assert!(s.contains("spi-ok"), "no spi-ok in {:?}..", &all[..all.len().min(64)]);
+    }
+
+    // CPU: predicated T1 ADD/SUB-immediate preserves flags (printNumber's
+    // `ite le; addle r3,#48; addgt r3,#55` must not execute both arms:
+    // addle must not kill N before addgt's test). Mirrors the existing
+    // MOVS/ADD-reg/SUB-reg it_pred rule in the decoder.
+    #[test]
+    fn ra4m1_usb_cdc_echo() {
+        // Native bulk endpoints, both directions through real pipe config:
+        // enumerate the echo sketch, discover the CDC bulk pipes via
+        // PIPECFG (no hardcoded pipe numbers), inject a multi-packet
+        // message on bulk-OUT (Serial.read path), expect the exact bytes
+        // back on bulk-IN (Serial.write path).
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4echo.bin");
+        let mut mem = ra4m1_memory();
+        // Erased flash reads 0xFF on silicon: pad the bootloader window
+        // with 0xFF so any wild jump below the app faults precisely at
+        // its landing (0xFFFF = undefined) instead of NOP-sliding on 0x00.
+        let mut img = vec![0xFFu8; APP_BASE as usize];
+        img.extend_from_slice(bin);
+        mem.load(&img, FLASH_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        usb_enumerate_cdc(sys, &mut mem, &mut cpu);
+
+        // Discover the CDC bulk pipes: TYPE==bulk(1), EPNUM==2, DIR=OUT/IN.
+        let mut out_pipe = None;
+        let mut in_pipe = None;
+        for n in 1..10u32 {
+            let c = usb_pipe_cfg(sys, n);
+            if (c >> 14) & 3 == 1 && c & 0xF == 2 {
+                if c & (1 << 4) == 0 { out_pipe = Some(n as usize); }
+                else { in_pipe = Some(n as usize); }
+            }
+        }
+        let (out_pipe, in_pipe) = (out_pipe.expect("bulk-OUT pipe"), in_pipe.expect("bulk-IN pipe"));
+
+        // 100 bytes > 64B MPS: multi-packet both ways. The OUT side goes
+        // in two host packets (64 + 36): after the first lands, run until
+        // the firmware drains it, then feed the rest - like a real host,
+        // which never pipelines a second packet over an unfinished one.
+        let msg: Vec<u8> = (0..100u32).map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8).collect();
+        let mut back = Vec::new();
+        for (step, window) in [&msg[..64], &msg[64..]].iter().enumerate() {
+            with_usb(sys, |u| u.rx_inject(sys, out_pipe, window));
+            for _ in 0..1200 {
+                cpu.run(sys, &mut mem, 48_000);
+                sys.tick();
+                assert!(cpu.fault.is_none(), "fault: {:?} step {}", cpu.fault, step);
+                back.extend(usb_take_tx(sys));
+                if back.len() >= msg.len() {
+                    break;
+                }
+                // Let the second packet in once the first is fully echoed.
+                if step == 0 && back.len() >= 64 {
+                    break;
+                }
+            }
+        }
+        // Drain any stragglers, then compare the exact round-trip.
+        for _ in 0..200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            back.extend(usb_take_tx(sys));
+            if back.len() >= msg.len() {
+                break;
+            }
+        }
+        assert_eq!(back, msg, "echo mismatch ({}B)", back.len());
+    }
+
+    #[test]
+    fn ra4m1_usb_serial_hello() {
+        // End-to-end Serial.print: enumerate the Serial sketch, do CDC line
+        // coding + DTR, run the loop, expect "hello" in the bulk capture.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4serial.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        // Standard enumeration (short budgets: device is already up).
+        let dev = usb_ctl_in(sys, &mut mem, &mut cpu, 0x0680, 0x0100, 0, 18, 18);
+        assert_eq!(dev.len(), 18, "dev desc {:?}", dev);
+        assert_eq!((dev[0], dev[1]), (18, 1), "DEVICE descriptor");
+        ctl_out(sys, &mut mem, &mut cpu, 0x0500, 5, 0, &[]);
+        let cfg9 = usb_ctl_in(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, 9, 9);
+        assert_eq!(cfg9.len(), 9, "cfg9 {:?}", cfg9);
+        assert_eq!(cfg9[1], 2, "CONFIGURATION descriptor");
+        let total = u16::from_le_bytes([cfg9[2], cfg9[3]]) as usize;
+        assert!(total > 9 && total < 512, "total {}", total);
+        let cfg = usb_ctl_in(sys, &mut mem, &mut cpu, 0x0680, 0x0200, 0, total as u16, total);
+        assert_eq!(cfg.len(), total, "cfg {:?}..", &cfg[..cfg.len().min(16)]);
+        ctl_out(sys, &mut mem, &mut cpu, 0x0900, 1, 0, &[]);
+
+        // CDC bring-up: GET_LINE_CODING returns the default 115200 8N1,
+        // SET_LINE_CODING programs 9600 8N1 (re-read proves the OUT data
+        // stage landed), SET_CONTROL_LINE_STATE asserts DTR+RTS.
+        let coding = usb_ctl_in(sys, &mut mem, &mut cpu, 0x21A1, 0, 0, 7, 7);
+        assert_eq!(coding.len(), 7, "line coding {:?}", coding);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2021, 0, 0,
+            &[0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08]);
+        let coding = usb_ctl_in(sys, &mut mem, &mut cpu, 0x21A1, 0, 0, 7, 7);
+        assert_eq!(coding, vec![0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08],
+            "9600 8N1 not stored {:?}", coding);
+        ctl_out(sys, &mut mem, &mut cpu, 0x2221, 3, 0, &[]);
+
+        // Run the loop; the sketch prints every ~400ms.
+        let mut all = Vec::new();
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            all.extend(usb_take_tx(sys));
+            if all.windows(7).any(|w| w == b"hello\r\n" || w == b"hello\n") {
+                break;
+            }
+        }
+        let s = String::from_utf8_lossy(&all);
+        assert!(s.contains("hello"), "no hello in {:?}..", &all[..all.len().min(64)]);
+    }
+
+    /// Read back a pipe's PIPECFG window (TYPE[15:14], DIR b4, EPNUM[3:0]).
+    fn usb_pipe_cfg(sys: &crate::system::WasmSystem, pipe: u32) -> u16 {
+        sys.p.write(sys, USBFS_BASE + 0x64, 2, pipe);
+        sys.p.read(sys, USBFS_BASE + 0x68, 2) as u16
+    }
+
+    #[test]
+    fn ra4m1_wire_ok() {
+        // End-to-end Wire EEPROM round-trip on real FSP r_iic_master:
+        // enumerate the Wire sketch, DTR, run the loop, expect "wire-ok"
+        // in the bulk capture (write 0x55/0x66 to slave 0x50:0x10, read
+        // back, compare on-device).
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4wire.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let _ = usb_take_tx(crate::sys());
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        with_usb(sys, |u| u.host_attach());
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+        with_usb(sys, |u| u.host_set_dvst(1));
+        crate::system::icu_raise_event(sys, 51);
+        run_until(sys, &mut mem, &mut cpu, 4_000_000, || false);
+
+        usb_enumerate_cdc(sys, &mut mem, &mut cpu);
+
+        // The sketch does one round-trip in setup(), then idles.
+        let mut all = Vec::new();
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            all.extend(usb_take_tx(sys));
+            if all.windows(7).any(|w| w == b"wire-ok" || w == b"wire-ng") {
+                break;
+            }
+        }
+        let s = String::from_utf8_lossy(&all);
+        assert!(s.contains("wire-ok"), "no wire-ok in {:?}..", &all[..all.len().min(96)]);
     }
 
     #[test]
@@ -299,15 +726,21 @@ mod tests {
 
     #[test]
     fn ra4m1_map_elc_routes_software_event() {
+        // Real ELC layout (R7FA4M1AB.h): ELSR0 (GPT_A link) at +0x10
+        // selects event 1 (ICU_IRQ0); a falling edge on IRQ0 starts
+        // GPT0 whose GTSSR selects the GPT_A source. The ELC signals
+        // peripherals directly - no NVIC involved, the started timer
+        // IS the verdict.
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
         let sys = crate::sys();
-        sys.p.write(sys, ELC_BASE + 0x00, 4, 0x42); // arm link 0
-        sys.p.write(sys, 0xE000_E104, 4, 1 << (60 - 32)); // enable IRQ60 via ISER1
-        sys.p.write(sys, ELC_BASE + 0x80, 4, 0x01); // fire link 0
-        assert_eq!(sys.p.read(sys, ELC_BASE + 0x84, 4) & 1, 1);
-        assert!(sys.p.nvic.borrow().has_pending());
+        sys.p.write(sys, ELC_BASE + 0x10, 2, 1); // ELSR0 = ICU_IRQ0
+        sys.p.write(sys, GPT0_BASE + 0x10, 4, 1 << 16); // GTSSR = GPT_A
+        sys.p.write(sys, ICU_BASE + 0x00, 1, 0x00); // IRQCR0: falling edge
+        assert_eq!(sys.p.read(sys, GPT0_BASE + 0x04, 4) & 1, 0, "stopped before edge");
+        assert!(crate::system::icu_pin_edge(sys, 0, true), "edge fires");
+        assert_eq!(sys.p.read(sys, GPT0_BASE + 0x04, 4) & 1, 1, "ELC started GPT0");
     }
 
     #[test]
@@ -1260,13 +1693,374 @@ mod tests {
 
     #[test]
     fn ra4m1_dtc_ok() {
-        // End-to-end DTC on real FSP drivers: GPT0 compare-A (every
-        // wrap) triggers a REPEAT transfer (2B samples -> DAC DADR0);
-        // the LED lights once DADR shows the last sample. The verdict
-        // polls DADR directly (no clock dependency).
+        // End-to-end DTC on real FSP drivers: GPT0 overflow (every wrap)
+        // triggers a REPEAT transfer (2B samples -> DAC DADR0). The test
+        // samples DADR over time; any non-zero sine sample proves the
+        // samples flowed through the DTC path (the old PORT-toggle
+        // verdict watched pins the sketch never changes).
         const APP_BASE: u32 = 0x4000;
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let bin = include_bytes!("../../blinky/r4dtc.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let mut saw_sample = sys.p.read(sys, DAC_BASE, 4) & 0xFFF != 0;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if sys.p.read(sys, DAC_BASE, 4) & 0xFFF != 0 {
+                saw_sample = true;
+                break;
+            }
+        }
+        assert!(saw_sample, "DADR0 never showed a DTC sample");
+    }
+
+    #[test]
+    fn ra4m1_pwm_ok() {
+        // End-to-end GPT PWM output on real firmware: a bare-metal sketch
+        // (Arduino's FspTimer PWM path is used by analogWrite; this drives
+        // the same registers directly) runs GPT0 at a 10-chunk period,
+        // 25% duty, GTIOA function 0 + OAE, P106 routed to GPT in PFS.
+        // The test samples PORT1.6 once per chunk and asserts toggling
+        // with ~25% duty - the verdict IS the waveform (an LED cannot
+        // show duty). Also proves the PFS slot map actually retains.
+        // (The real analogWrite() path is proven separately in
+        // analogwrite_ok - this stays bare-metal for the waveform.)
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::system::gpt_out_reset();
+        let bin = include_bytes!("../../blinky/r4pwm.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        assert_eq!((sys.p.read(sys, 0x4004_0858, 4) >> 24) & 0x1F, 0x03, "P106 PSEL");
+        let mut high = 0;
+        let mut low = 0;
+        for _ in 0..40 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 6) != 0 {
+                high += 1;
+            } else {
+                low += 1;
+            }
+        }
+        assert!(low > 0 && high > 0, "no toggling (high={}, low={})", high, low);
+        assert!((6..=14).contains(&high), "duty ~25%: high={}/40", high);
+    }
+
+    #[test]
+    fn ra4m1_tone_ok() {
+        // End-to-end tone() on real Arduino API: tone(LED_BUILTIN, 440)
+        // drives an FspTimer in PERIODIC mode with an overflow IRQ that
+        // toggles the pin via digitalWrite. The test samples the LED
+        // pin (P111) over 40 chunks and asserts both states appear -
+        // the toggle IS the verdict (frequency is implied by the FSP
+        // period math already proven in the timer tests).
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4tone.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 2_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let mut high = 0;
+        let mut low = 0;
+        for _ in 0..40 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11) != 0 {
+                high += 1;
+            } else {
+                low += 1;
+            }
+        }
+        assert!(high > 0 && low > 0, "no toggling (high={}, low={})", high, low);
+    }
+
+    #[test]
+    fn ra4m1_softserial_ok() {
+        // End-to-end SoftwareSerial loopback on real Arduino API: TX on
+        // D3 (P104) wired to RX on D2 (P105, IRQ0) via the soft_wire
+        // jig. The lib drives everything in hardware fashion - GPT
+        // timers at baud rate, DMAC channels moving PCNTR3/PCNTR2
+        // samples on CCMPA events, the RX pin CHANGE IRQ, and the ELC
+        // GPT_A link starting/clearing the RX timer on each edge. The
+        // sketch sends 0xA5 and the verdict is the echoed byte.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::peripherals::ra_port::RaPort::soft_wire(1, 4, 1, 5, 0);
+        crate::system::get_uart_output().lock().unwrap().clear();
+        let bin = include_bytes!("../../blinky/r4sser.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        // Interleaved rounds: the sketch busy-waits on DMCNT/TCFPO,
+        // which only advance across sys.tick() boundaries (timers count
+        // in ticks, DMA executes in the run loop) - one long run would
+        // spin forever with time standing still.
+        let mut done = false;
+        for round in 0..300 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if crate::system::get_uart_output().lock().unwrap().contains("got=A5") {
+                done = true;
+                break;
+            }
+        }
+        let uart = crate::system::get_uart_output().lock().unwrap().clone();
+        assert!(done, "UART: {}", uart);
+        assert_ne!(sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11), 0, "LED HIGH");
+    }
+
+    #[test]
+    fn ra4m1_analogwrite_ok() {
+        // End-to-end analogWrite() on real Arduino API: analogWrite(6, 64)
+        // (D6 = GPT0/GTIOCB, default 490Hz 8-bit) must program GTPR0 for
+        // 490Hz, GTCCRB0 for ~25% (64/255), GTIOR0.OBE, and start the
+        // counter. Two model gaps closed to get here, both found by
+        // disassembling libfsp.a against R7FA4M1AB.h: R_GPT_Open and
+        // R_GPT_DutyCycleSet program duties into the BUFFER registers
+        // (GTCCRC buffers A, GTCCRD buffers B) with GTBER.CCRA/CCRB=01
+        // and rely on silicon to transfer C->A / D->B at each wrap -
+        // the model was missing GTBER+0x40 and the wrap transfer, so
+        // GTCCRA/B stayed erased though GTPR/GTIOR/GTSTR looked right
+        // (GTCCRB=+0x50 is the transfer TARGET, never written by FSP).
+        // FSP programs GTIOB function 9, so the function-0 PORT latch
+        // does not follow it - the register verdict stands in for the
+        // waveform (bare-metal function-0 duty is measured in pwm_ok).
+        const APP_BASE: u32 = 0x4000;
+        const GPT0: u32 = 0x4007_8000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4aw.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        assert_eq!(sys.p.read(sys, GPT0 + 0x04, 4) & 1, 1, "GTSTR0 CSTRT");
+        let gtpr = sys.p.read(sys, GPT0 + 0x64, 4);
+        assert!((97_900..=98_100).contains(&gtpr), "GTPR0 490Hz: {}", gtpr);
+        let gtccrb = sys.p.read(sys, GPT0 + 0x50, 4);
+        assert_ne!(gtccrb, 0xFFFF_FFFF, "GTCCRB0 programmed");
+        assert!((24_400..=24_800).contains(&gtccrb), "GTCCRB0 ~25%: {}", gtccrb);
+        assert_ne!(sys.p.read(sys, GPT0 + 0x34, 4) & (1 << 24), 0, "GTIOR0 OBE");
+        assert_ne!(sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11), 0, "LED HIGH");
+    }
+
+    #[test]
+
+    fn ra4m1_matrix_ok() {
+        // End-to-end LED matrix on bare-metal GPIO (the Arduino matrix
+        // lib targets WiFi-variant pins Minima lacks): a 12x8 smiley is
+        // charlieplex-multiplexed on the real 11-pin matrix set; the
+        // test reconstructs the frame from PODR+PDR samples (anode
+        // driven HIGH + cathode driven LOW = lit) and asserts the exact
+        // bitmap. No panel on Minima - the pattern IS the verdict.
+        const APP_BASE: u32 = 0x4000;
+        const MP: [(u32, u8); 11] = [
+            (0, 3), (0, 4), (0, 11), (0, 12), (0, 13), (0, 15),
+            (2, 4), (2, 5), (2, 6), (2, 12), (2, 13),
+        ];
+        const SMILE: [u8; 12] = [
+            0x3C, 0x42, 0xA5, 0x81, 0xA5, 0x99, 0xA5, 0x81, 0xA5, 0x42, 0x3C, 0x00,
+        ];
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4matrix.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let pin_hi = |sys: &crate::system::WasmSystem, port: u32, bit: u8| -> bool {
+            let podr = sys.p.read(sys, PORT_BASE + port * 0x20, 4) & 0xFFFF;
+            let pdr = (sys.p.read(sys, PORT_BASE + port * 0x20, 4) >> 16) & 0xFFFF;
+            (pdr >> bit) & 1 != 0 && (podr >> bit) & 1 != 0
+        };
+        let pin_lo = |sys: &crate::system::WasmSystem, port: u32, bit: u8| -> bool {
+            let podr = sys.p.read(sys, PORT_BASE + port * 0x20, 4) & 0xFFFF;
+            let pdr = (sys.p.read(sys, PORT_BASE + port * 0x20, 4) >> 16) & 0xFFFF;
+            (pdr >> bit) & 1 != 0 && (podr >> bit) & 1 == 0
+        };
+        let mut seen = [false; 96];
+        for _ in 0..400 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            for k in 0..96usize {
+                let a = k / 9;
+                let t = k % 9;
+                let c = t + if t >= a { 1 } else { 0 };
+                if pin_hi(sys, MP[a].0, MP[a].1) && pin_lo(sys, MP[c].0, MP[c].1) {
+                    seen[k] = true;
+                }
+            }
+        }
+        for k in 0..96usize {
+            let want = (SMILE[k / 8] >> (k % 8)) & 1 != 0;
+            assert_eq!(seen[k], want, "led {} (x={} y={})", k, k / 8, k % 8);
+        }
+    }
+
+    #[test]
+    fn ra4m1_map_can1_loopback() {
+        // CAN1 self-test loopback (polled): same mailboxes as CAN0 but
+        // no ELC event codes on this part, so TX completion and RX
+        // arrival surface only as SENTDATA/NEWDATA (no IRQ asserts).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, CAN1_BASE + 0x840, 2, 0x0100); // CANM = reset
+        sys.p.write(sys, CAN1_BASE + 0x844, 4, 0x0018_0009); // BCR retain
+        sys.p.write(sys, CAN1_BASE + 0x840, 2, 0x0200); // CANM = halt
+        sys.p.write(sys, CAN1_BASE + 0x858, 1, 0x07); // TCR: self-test
+        sys.p.write(sys, CAN1_BASE + 0x840, 2, 0x0000); // CANM = operation
+        sys.p.write(sys, CAN1_BASE + 0x400, 4, 0); // MKR0: accept all
+        sys.p.write(sys, CAN1_BASE + 0x428, 4, 0); // MKIVLR
+        sys.p.write(sys, CAN1_BASE + 0x200, 4, 0x321 << 18); // MB0 SID
+        sys.p.write(sys, CAN1_BASE + 0x204, 2, 2); // DLC
+        sys.p.write(sys, CAN1_BASE + 0x206, 1, 0xDE);
+        sys.p.write(sys, CAN1_BASE + 0x207, 1, 0xAD);
+        sys.p.write(sys, CAN1_BASE + 0x820 + 0, 1, 0x80); // MB0 TRMREQ
+        sys.p.write(sys, CAN1_BASE + 0x820 + 8, 1, 0x40); // MB8 RECREQ
+        sys.tick();
+        assert_eq!(sys.p.read(sys, CAN1_BASE + 0x820, 1) & 0x81, 0x01, "SENTDATA");
+        assert_eq!(sys.p.read(sys, CAN1_BASE + 0x820 + 8, 1) & 0x01, 0x01, "NEWDATA");
+        assert_eq!(sys.p.read(sys, CAN1_BASE + 0x280, 4) & 0xFFFF_FFFF, 0x321 << 18, "MB8 ID");
+        assert_eq!(sys.p.read(sys, CAN1_BASE + 0x286, 1) & 0xFF, 0xDE, "MB8 data");
+        assert!(!sys.p.nvic.borrow().has_pending(), "no IRQ without events");
+    }
+
+    #[test]
+    fn ra4m1_map_dac8() {
+        // DAC8: values retain, output gated by DAM DACE bits.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, DAC8_BASE + 0x00, 1, 0xAB); // DACS0
+        sys.p.write(sys, DAC8_BASE + 0x01, 1, 0xCD); // DACS1
+        assert_eq!(sys.p.read(sys, DAC8_BASE + 0x00, 1) & 0xFF, 0xAB);
+        assert_eq!(sys.p.read(sys, DAC8_BASE + 0x01, 1) & 0xFF, 0xCD);
+        sys.p.write(sys, DAC8_BASE + 0x03, 1, 1 << 4); // DAM.DACE0
+        assert_eq!(sys.p.read(sys, DAC8_BASE + 0x03, 1) & 0xFF, 1 << 4, "DAM");
+    }
+
+    #[test]
+    fn ra4m1_map_tsn() {
+        // TSN calibration registers: fixed factory-trim constants
+        // (documented synthetic; the temp value itself flows via ADC).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        assert_eq!(sys.p.read(sys, FACI_BASE + 0x228, 1) & 0xFF, 0xE0, "TSCDRL");
+        assert_eq!(sys.p.read(sys, FACI_BASE + 0x229, 1) & 0xFF, 0x08, "TSCDRH");
+    }
+
+    #[test]
+    fn ra4m1_map_slcdc() {
+        // SLCDC: mode/clock regs + 64B display RAM retain (no panel).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, SLCDC_BASE + 0x00, 1, 0x07); // LCDM0
+        sys.p.write(sys, SLCDC_BASE + 0x03, 1, 0x11); // VLCD
+        sys.p.write(sys, SLCDC_BASE + 0x100, 1, 0x5A); // SEG0
+        sys.p.write(sys, SLCDC_BASE + 0x13F, 1, 0xA5); // SEG63
+        assert_eq!(sys.p.read(sys, SLCDC_BASE + 0x00, 1) & 0xFF, 0x07);
+        assert_eq!(sys.p.read(sys, SLCDC_BASE + 0x03, 1) & 0xFF, 0x11);
+        assert_eq!(sys.p.read(sys, SLCDC_BASE + 0x100, 1) & 0xFF, 0x5A);
+        assert_eq!(sys.p.read(sys, SLCDC_BASE + 0x13F, 1) & 0xFF, 0xA5);
+    }
+
+    #[test]
+    fn ra4m1_map_kint() {
+        // KINT key interrupt: enable + key mask, virtual key press
+        // latches KRF and pends the routed KEY_INT (event 69); W0C
+        // clears. Disabled controller ignores presses.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        assert!(!crate::system::kint_key_press(sys, 3), "disabled: no fire");
+        assert_eq!(sys.p.read(sys, KINT_BASE + 0x04, 1) & 0xFF, 0, "no flag");
+        sys.p.write(sys, KINT_BASE + 0x00, 1, 0x01); // KRCTL.KREG
+        sys.p.write(sys, KINT_BASE + 0x08, 1, 1 << 3); // KRM key3
+        sys.p.write(sys, 0x4000_6300 + 7 * 4, 4, 69); // IELSR7 = KEY_INT
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 7); // ISER0: IRQ7
+        assert!(crate::system::kint_key_press(sys, 3), "fires");
+        assert_eq!(sys.p.read(sys, KINT_BASE + 0x04, 1) & 0xFF, 1 << 3, "KRF3");
+        assert!(sys.p.nvic.borrow().has_pending(), "KEY_INT pending");
+        sys.p.write(sys, KINT_BASE + 0x04, 1, !(1 << 3) & 0xFF); // W0C
+        assert_eq!(sys.p.read(sys, KINT_BASE + 0x04, 1) & 0xFF, 0, "KRF clear");
+    }
+
+    #[test]
+    fn ra4m1_can1_ok() {
+        // End-to-end CAN1 on bare-metal firmware (no Arduino CAN1 on Minima): self-test loopback MB0->MB8 polled, LED on ID+data match. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4can1.bin");
         let mut mem = ra4m1_memory();
         mem.load(bin, APP_BASE);
         let sp = mem.read32(APP_BASE);
@@ -1298,7 +2092,164 @@ mod tests {
                 break;
             }
         }
-        assert!(toggled, "LED never lit: DTC never moved samples to DAC");
+        assert!(toggled, "LED never lit");
+    }
+
+    #[test]
+    fn ra4m1_dac8_ok() {
+        // End-to-end DAC8 on bare-metal firmware (no Arduino consumer): enable ch0, write/read back DACS0, LED on match. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4dac8.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "LED never lit");
+    }
+
+    #[test]
+    fn ra4m1_kint_ok() {
+        // End-to-end KINT key interrupt: the sketch enables the
+        // controller and polls KRF; the test injects a virtual key-3
+        // press (flag latches, KEY_INT would fire if routed) and the
+        // LED lights once the sketch sees it. No USB involved.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4kint.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        // Let the sketch pass its millis gate and enable the controller.
+        for _ in 0..2200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        }
+        let first = snap();
+        assert!(crate::system::kint_key_press(sys, 3), "press fires");
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "LED never lit: key press never seen");
+    }
+
+    #[test]
+    fn ra4m1_map_ssi() {
+        // SSI0: FIFO reset strobes self-clear, TX drains on tick while
+        // TEN runs (TDE), RX streams the reset-based pattern while REN
+        // runs (RDF), TXI/RXI edge events when enabled.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, SSI0_BASE + 0x10, 4, 0x03); // TFRST+RFRST
+        assert_eq!(sys.p.read(sys, SSI0_BASE + 0x10, 4) & 0x03, 0, "strobe clear");
+        sys.p.write(sys, SSI0_BASE + 0x00, 4, 0x03); // REN+TEN
+        sys.p.write(sys, SSI0_BASE + 0x18, 4, 0x11111111);
+        sys.p.write(sys, SSI0_BASE + 0x18, 4, 0x22222222);
+        assert_eq!(sys.p.read(sys, SSI0_BASE + 0x14, 4) & (1 << 16), 0, "not empty yet");
+        sys.tick(); // TX drains
+        assert_ne!(sys.p.read(sys, SSI0_BASE + 0x14, 4) & (1 << 16), 0, "TDE");
+        assert_eq!(sys.p.read(sys, SSI0_BASE + 0x14, 4) & 0x3F00, 0x0100, "RDC=1");
+        assert_ne!(sys.p.read(sys, SSI0_BASE + 0x14, 4) & 1, 0, "RDF");
+        sys.tick();
+        sys.tick();
+        assert_eq!(sys.p.read(sys, SSI0_BASE + 0x1C, 4), 0, "sample0");
+        assert_eq!(sys.p.read(sys, SSI0_BASE + 0x1C, 4), 1, "sample1");
+    }
+
+    #[test]
+    fn ra4m1_ssi_ok() {
+        // End-to-end SSI0 on bare-metal firmware (the Arduino I2S lib
+        // does not compile on this core): TX samples drain, RX streams
+        // the reset-based pattern, LED on exact 0,1,2,3 read-back.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4ssi.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        let snap = || -> [u32; 12] {
+            let mut s = [0u32; 12];
+            for p in 0..12u32 {
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+            }
+            s
+        };
+        let first = snap();
+        let mut toggled = false;
+        for _ in 0..3000 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if snap() != first {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "LED never lit: SSI round-trip failed");
     }
 
     #[test]
@@ -1436,11 +2387,6 @@ mod tests {
             with_usb(sys, |u| u.rx_inject(sys, 0, data));
         }
         run_until(sys, mem, cpu, 6_000_000, || false);
-    }
-
-    fn usb_pipe_cfg(sys: &crate::system::WasmSystem, pipe: u32) -> u16 {
-        sys.p.write(sys, USBFS_BASE + 0x64, 2, pipe);
-        sys.p.read(sys, USBFS_BASE + 0x68, 2) as u16
     }
 
     fn usb_take_tx(sys: &crate::system::WasmSystem) -> Vec<u8> {
@@ -1969,12 +2915,12 @@ mod tests {
         sys.tick();
         let cnt = sys.p.read(sys, 0x4008_4200, 2) & 0xFFFF;
         assert!(cnt > 0 && cnt < 500, "agt2 cnt={}", cnt);
-        // GPT8 16-bit counter with period.
-        sys.p.write(sys, 0x4007_8808, 4, 200);
-        sys.p.write(sys, 0x4007_8800, 4, 1);
+        // GPT8 16-bit counter with period (real offsets).
+        sys.p.write(sys, 0x4007_8864, 4, 200); // GTPR
+        sys.p.write(sys, 0x4007_882C, 4, 1); // GTCR.CST
         crate::system::INSTRUCTION_COUNT.fetch_add(100, std::sync::atomic::Ordering::Relaxed);
         sys.tick();
-        let g = sys.p.read(sys, 0x4007_8804, 4);
+        let g = sys.p.read(sys, 0x4007_8848, 4); // GTCNT
         assert!(g > 0 && g <= 200, "gpt8 cnt={}", g);
         // SCI5 UART TX reaches the console.
         crate::system::get_uart_output().lock().unwrap().clear();

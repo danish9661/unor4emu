@@ -11,7 +11,7 @@ Playwright screenshots with a clean console.
 ## Verdict
 
 No — not everything is implemented. But nothing known is broken: both
-suites are green (184 + 50, single-threaded), the demo runs three real
+suites are green (198 + 70, single-threaded), the demo runs three real
 firmware images live, and every gap below is enumerated with its
 Arduino relevance. The pattern is consistent: everything the Arduino
 core drives on real Minima sketches is modeled and proven; the missing
@@ -19,30 +19,32 @@ pieces are either unused by Arduino or parked platform work (WiFi).
 
 ## Test inventory (all green, `--test-threads=1`)
 
-- Snapshot `core/ra4m1-periph-wasm`: **184** = 128 legacy CPU decoder
-  tests + 56 R4 proofs in `src/ra4m1.rs` (boot, clock stub, SCI TX,
+- Snapshot `core/ra4m1-periph-wasm`: **198** = 128 legacy CPU decoder
+  tests + 70 R4 proofs in `src/ra4m1.rs` (boot, clock stub, SCI TX,
   GPT, PORT, MMIO blinky, ADC, DAC, RTC, RTC alarm, DMAC, DTC repeat
   + GPT->DAC firmware, ELC, AGT, CRC/DOC, SCI echo, OPAMP/ACMP,
   dataflash program/erase, OPAMP firmware, CTSU, CTSU mutual +
   firmware, CAN loopback, CAN errors + isError firmware, I2C EEPROM,
   I2C slave, SPI slave + firmware, Wire slave firmware, CAN FIFO +
-  firmware, SD card + firmware, SCI-SPI loopback, SPI loopback, USB
+  firmware, SD card + firmware, PWM + firmware, SCI-SPI loopback, SPI loopback, USB
   TX capture, CDC enumerate, Serial hello, USB suspend/resume, HID
   keyboard, USB suspend/resume firmware, CDC echo, Wire ok, SPI ok,
   CAN ok, ITE flags, ICU pin-IRQ, EEPROM firmware, attachInterrupt,
   Serial1 echo, extra channels, RTC firmware, WDT refresh/expire,
+  CAN1 + DAC8 + TSN + SLCDC + KINT + SSI + matrix proofs,
   Blink boots, Blink toggles).
-- Small core `core/ra4m1-core`: **50** proofs (mirror, incl. ITE flags,
-  the USB host-flow helpers + HID/suspend firmware proofs, DTC repeat,
-  CAN errors).
+- Small core `core/ra4m1-core`: **70** proofs (exact one-for-one mirror
+  of the snapshot's R4 proofs, incl. ITE flags, USB host-flow helpers,
+  HID/suspend firmware proofs, DTC repeat, CAN errors; runs 3-4x faster
+  than the snapshot suite).
 - WASM: 228KB release (`uno_r4_minima_wasm_bg.wasm`), no STM32/ESP32.
 - Demo `demo/`: Blink LED + GPIO grid, Serial enumerate + hello,
   Echo round-trip, Wire master/slave trace, SPI master/slave trace,
-  SD init + MBR dump, CAN FIFO trace, EEPROM byte trace — all
+  SD init + MBR dump, CAN FIFO trace, EEPROM byte trace, PWM duty — all
   screenshot-verified, console clean. Deploys to Pages via workflow.
 - Core parity: snapshot vs small-core models differ ONLY in env-gated
   debug logs (`ICULOG`/`SELLOG`/`EXCLOG` in snapshot) plus snapshot's
-  legacy CPU tests. No behavioral drift.
+  legacy CPU tests. R4 proofs are one-for-one identical (70/70). No behavioral drift.
 - Upstream CPU reports in `Documents/stm32 F4/cpu_bug.md`: §11
   (exception live-r13, both cores fixed), §12 (predicated ADD/SUB-imm
   flags, both cores fixed). Plus the earlier MRS-PSR IPSR fix.
@@ -57,12 +59,12 @@ Bases from `R7FA4M1AB.h`. "Arduino use" = what ArduinoCore-renesas
 | Block | Base | Model | Proof |
 |---|---|---|---|
 | PORT0-14 | `0x4004_0000`+n*`0x20` | `ra_port.rs` real PCNTR layout, input-inject hook | port retained, blink toggles, demo grid |
-| PFS | `0x4004_0800` | retain map | via PORT proofs |
+| PFS | `0x4004_0800` | retain map (separate instance, explicit flag - slot offsets never reach 0x800) | via PORT proofs + PWM routing |
 | SYSC/MSTP | `0x4001_E000`/`0x4004_6FFC` | accept-and-retain stubs | boot proofs |
 | ICU | `0x4000_6000` | IELSR routing mirror | ELC/USB/CAN/CTSU IRQ proofs |
 | ELC | `0x4004_1000` | link table + soft trigger (GPT/ADC dispatch) | elc routes event |
 | SCI0-9 | `0x4007_0000`+ch*`0x20` | `ra_sci.rs` UART byte-exact + simple-SPI mode (ch4-9 eventless polled) | TX console, echo path, SPI loopback, Serial1 proof (SCI2) |
-| GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` instruction-count driven (ch8-13 eventless) | counts + matches |
+| GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` real offsets (GTCR+0x2C GTIOR+0x34 GTCNT+0x48 GTCCR+0x4C GTPR+0x64), wrap/compare/overflow events, GTIOA/B function-0 PWM latches routed to PORT via PFS pinmux table | counts + matches, PWM + firmware (25% duty on D6) |
 | AGT0-5 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` down-counter, latched reload, TUNDF (ch2-5 eventless) | counts, millis IRQs |
 | ADC0/1 | `0x4005_C000`/`0x4005_C200` | `ra_analog.rs` ADST=bit15, overrides | converts channel |
 | DAC12 | `0x4005_E000` | retained output | dac retained |
@@ -79,6 +81,13 @@ Bases from `R7FA4M1AB.h`. "Arduino use" = what ArduinoCore-renesas
 | Dataflash | `0x4010_0000` | 8KB window (erased 0xFF, bit-clear writes) | program/erase proof + EEPROM firmware proof |
 | FACI_LP | `0x407E_C000` | program/erase/blankcheck engine (FSAR bias, FRDY busy latch, BCERR0) + FENTRYR | R_FLASH_LP driver proven via EEPROM |
 | ICU ext-IRQ | `0x4000_6000` | IRQCR sense + `icu_pin_edge` injection, IELSR routing | pin-IRQ + attachInterrupt proofs (all 16 lines) |
+| KINT | `0x4008_0000` | KRCTL/KRF/KRM + `kint_key_press` jig into KEY_INT event 69 | key flag + firmware proof |
+| SLCDC | `0x4008_2000` | mode regs + 64B display RAM retain (no panel) | regs + display RAM proof |
+| SSI0 | `0x4004_E000` | TX drain + RX pattern FIFO + TXI/RXI edges | flags + bare-metal firmware proof (Arduino I2S lib broken) |
+| CAN1 | `0x4005_1000` | same mailboxes as CAN0, eventless (polled SENTDATA/NEWDATA) | self-test loopback + bare-metal firmware proof |
+| DAC8 | `0x4009_E000` | DACS retain + DAM enable gate | retain + bare-metal firmware proof |
+| TSN cal | `0x407E_C228` | fixed factory-trim constants (synthetic) | calibration read proof |
+| LED matrix | GPIO P0/P2 | 12x8 charlieplex render from the real 11-pin set | smiley reconstruction proof + demo tab |
 | ARM | `0xE000_xxxx` | NVIC/SysTick/SCB/MPU/FPU/DWT/STIR/ITM reused | legacy CPU suite |
 
 Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
@@ -95,8 +104,8 @@ Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
 - **IIC**: master + slave proven incl. firmware (shared-bus fabric); 10-bit/general-call unmodeled.
 - **SCI-SPI / RSPI**: master + RSPI slave proven incl. firmware; RSPI assumes 8-bit frames.
 - **USBFS**: device with CDC + HID keyboard + suspend/resume proven incl. firmware; no MSC/audio classes.
-- **CAN1**: unmapped — no routable mailbox events on this part.
-- **DAC8** (`0x4009_E000`): unmapped. Arduino AnalogWave uses DAC12.
+- **CAN1**: DONE — same mailboxes as CAN0, eventless (polled SENTDATA/NEWDATA), self-test loopback proven bare-metal (no Arduino CAN1 on Minima: `CAN_HOWMANY=1`, and no ELC codes exist for it).
+- **DAC8** (`0x4009_E000`): DONE — DACS retain + DAM enable gate, bare-metal firmware proof (no Arduino consumer: `DAC8_HOWMANY=0`).
 - **GPIO input**: works via injection hook (`set_input`, like `uart_rx_byte`); pin levels feed `icu_pin_edge` for external IRQs.
 - **Clocks**: no tree modeling — fixed 48MHz/PCLKB assumptions baked into dividers (AGT /8). `SystemInit` writes are accepted, never interpreted.
 - **SCB VTOR**: keeps bits[31:7] like silicon (was a 1KB mask). Arduino parks its RAM vector table at `0x20007F00`; the old mask mangled it to `0x20007C00` so every IRQ vectored into stack garbage (Blink survived by luck, FAT-format died at the first AGT tick). Fixed in both cores.
@@ -105,15 +114,16 @@ Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
 
 - **External pin interrupts** (`attachInterrupt`, ICU IRQCR/NMI): DONE — `icu_pin_edge` injection, all 16 lines proven with a button sketch.
 - **EEPROM / dataflash programming** (FACI): DONE — dataflash window + FACI_LP engine, Arduino EEPROM round-trip proven.
-- **I2S audio** (SSI0 `0x4004E000`): NO Arduino consumer — the in-tree I2S library does not compile on Renesas core 1.6.0 (`r_i2s_api.h` missing from the shipped FSP). Unmodeled until a buildable consumer appears.
+- **I2S audio / SSI0** (`0x4004E000`): DONE (bare-metal) — TX drain + RX pattern FIFO + TXI/RXI edges, firmware proof on exact 0,1,2,3 read-back. The in-tree Arduino I2S lib still does not compile (`r_i2s_api.h` missing) — an upstream toolchain gap, not a model gap.
 - **USB MSC**: NO Arduino consumer (`CFG_TUD_MSC=0`, no in-tree MSC library). Unmodeled until one appears.
 - **FAT filesystems**: IMPOSSIBLE on Minima by silicon-truth, proven by construction: FATFileSystem needs >=64 sectors = 32KB minimum volume (Arduino glue asserts it), but Minima has 32KB RAM / 8KB heap total; LittleFS metadata does not fit 8x1KB dataflash blocks either (its own block-range assert fires during format). The dataflash consumer that does exist (Arduino EEPROM via virtualEEPROM) is proven. Real FAT-over-SD needs the SDHI peripheral (4-bit SD bus + ADMA + closed FSP R_SDHI) — assessed, parked as future work (same disasm-driven recipe as FACI/USB).
 - **AnalogWave wrapper** (FspTimer/IRQManager side): the DTC engine underneath is proven, but `analogWave.begin()` never reaches R_DTC_Open in emulation (no GPT writes, no DTCE — fails inside Arduino's timer/IRQ plumbing before touching DTC). The bare-metal FSP R_DTC proof (`r4dtc.bin`) covers the engine instead.
 - **USB HID endpoints**: DONE — PluggableUSB keyboard (report descriptor + INT-IN report) proven.
 - **USB suspend/resume**: DONE — DVSQ SUSPx + RESM + WKUP, weak-callback firmware proof.
 - **SD storage**: DONE — virtual SD slave in SPI mode (CMD0/8/55/41/58/17/24, MBR + write/read-back) proven. FATFilesystem over it untested.
-- **System/debug**: BUS, CAC, DEBUG, FCACHE, SRAM (ECC/parity cfg), PMISC, TSN, SLCDC (no LCD on Minima), KINT. Unmapped on purpose; Arduino boot touches none of them (Blink boots clean). Any access faults precisely like unmapped silicon.
-- **WiFi** (`wasm-wifi/`, ESP32-S3) and **LED matrix**: parked by design, folders stay on disk excluded from the workspace.
+- **TSN / SLCDC / KINT**: DONE — TSN calibration constants (synthetic, documented), SLCDC mode regs + 64B display RAM retain (no panel), KINT KRCTL/KRF/KRM + `kint_key_press` jig into KEY_INT event 69 with firmware proof. No Arduino consumers for any of them.
+- **System/debug**: BUS, CAC, DEBUG, FCACHE, SRAM (ECC/parity cfg), PMISC. Unmapped on purpose; Arduino boot touches none of them (Blink boots clean). Any access faults precisely like unmapped silicon.
+- **WiFi** (`wasm-wifi/`, ESP32-S3): parked by design, folders stay on disk excluded from the workspace. **LED matrix**: DONE — 12x8 charlieplex GPIO render from the real 11-pin set (smiley reconstruction proof + demo tab); the Arduino matrix lib targets WiFi-variant pins Minima lacks, so the proof is bare-metal.
 
 ## Known quirks (all covered by proofs, listed so nobody "fixes" them)
 
@@ -122,9 +132,12 @@ Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
 - RIIC: ST auto-sets MST/TRS; TDRE+TXI fire on START; enables fire latched flags; first RXI read is a dummy (no byte0 preload); restart-write has no completion event (FSP quirk, tolerated).
 - Virtual-time assumptions: AGT/RTC/WDT run on instruction count (WDT FSP default is TOPS=3 = 4096 ticks); ADC converts instantly; CAN loopback needs self-test mode; I2C slave jig lives at 0x50; SPI loopback is a test jig (open bus reads 0xFF); SD CRCs are accepted unchecked and CS is always-selected; the RTC alarm is evaluated against the current second on each tick, so tests step second-by-second; USB HID reports complete on FIFO flush (no IN-token modeling); DTC transfers complete in the CPU run loop while staged (peripheral ticks own no RAM).
 - FSP passes raw EIFR bits as the CAN error event (`ERR_WARNING=2`, `ERR_PASSIVE=4`): inject one threshold per episode like silicon, or Arduino's exact-match switch sees nothing.
+- SSI TDE means TX FIFO empty (like SCI TDRE); the RX pattern counter resets on RFRST; CAN1/DAC8/TSN/SLCDC/KINT/SSI/matrix have no Arduino consumers on Minima, so their proofs are register-level + bare-metal firmware (no Arduino-lib flows).
+- GPT compares are crossing-detected (coarse virtual ticks jump over exact equalities); unprogrammed all-ones compares are bounded by the period so they never false-fire on wrap.
+- PORT and PFS are separate peripheral instances keyed by an explicit flag; PWM pins follow GPT latches only when PFS PSEL selects a GPT function.
 - Vendored firmware (`core/blinky/r4*.bin`) is built with arduino-cli 1.6.0 and committed; `demo/pkg` + `demo/fw` are generated (git-ignored, `./demo/build.sh` rebuilds).
 
 ## What's next (priority order)
 
-1. **Platform**: WiFi un-park (ESP32-S3), LED-matrix-from-GPIO. Demo ships Blink/Serial/Echo/Wire/SPI/SD tabs + a Pages deploy workflow (`.github/workflows/pages.yml`, runs on push to master).
-2. **New models**: SDHI for FAT-over-SD (the only remaining consumer-backed gap); anything else only as a buildable Arduino consumer appears.
+1. **Platform**: WiFi un-park (waiting on S3 code). Demo ships Blink/Serial/Echo/Wire/SPI/SD/CAN/EEPROM/PWM/RTC/CTSU/HID/Matrix/Docs tabs + MIPS meter + a Pages deploy workflow.
+2. **New models**: nothing with a buildable Arduino consumer remains (MSC lacks consumers and its core header hardcodes it off; FAT needs 32KB; SDHI has no on-chip peripheral — all closed with reasons above).

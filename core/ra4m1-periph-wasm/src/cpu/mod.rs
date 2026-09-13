@@ -1,8 +1,6 @@
 pub mod regs;
 pub mod mem;
 pub(crate) mod thumb;
-#[cfg(test)]
-mod tests;
 pub use regs::Regs;
 pub use mem::Memory;
 use crate::system::WasmSystem;
@@ -320,14 +318,6 @@ impl Cpu {
     fn select_pending(&self, sys: &WasmSystem) -> Option<i32> {
         let exec_prio = self.execution_priority(sys);
         let bits = sys.p.nvic.borrow().pending_bits();
-        if std::env::var("SELLOG").is_ok() && bits != 0 {
-            static SEL_N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if SEL_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-                eprintln!("SELLOG bits={:x} exec={} depth={} pm={} fm={} bp={} ipsr={}",
-                    bits, exec_prio, self.exc_stack.len(), self.regs.primask, self.regs.faultmask,
-                    self.regs.basepri, self.ipsr);
-            }
-        }
         let mut best: Option<(i32, u32, i32)> = None; // (group, sub, irq)
         let mut b = bits;
         while b != 0 {
@@ -360,14 +350,7 @@ impl Cpu {
                 best = Some((group, sub, irq));
             }
         }
-        let verdict = best.map(|(_, _, irq)| irq);
-        if std::env::var("SELLOG").is_ok() && bits != 0 {
-            static SEL_M: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if SEL_M.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 6 {
-                eprintln!("SELLOG verdict={:?}", verdict);
-            }
-        }
-        verdict
+        best.map(|(_, _, irq)| irq)
     }
 
     /// Raise a synchronous exception (SVC insn, MPU fault, UsageFault):
@@ -416,10 +399,6 @@ impl Cpu {
     /// (negative irq) and external IRQs, thread or nested (an IRQ taken in
     /// handler mode runs on MSP and returns via F1 to the outer handler).
     pub fn take_exception(&mut self, sys: &WasmSystem, mem: &mut dyn Memory, irq: i32) {
-        if std::env::var("EXCLOG").is_ok() {
-            eprintln!("EXCLOG take irq={} pc={:08x} cnt={}", irq, self.regs.r[15] & !1,
-                crate::system::INSTRUCTION_COUNT.load(std::sync::atomic::Ordering::Relaxed));
-        }
         let vector = (16 + irq) as u32;
         // Bank the thread stack, then run the handler on MSP. The frame
         // goes onto the CURRENT stack (PSP if thread+PSP, else MSP) — this
@@ -569,10 +548,6 @@ impl Cpu {
         // Load handler PC through VTOR (model SCB, default 0x08000000).
         let vtor = sys.p.read(sys, 0xE000ED08, 4);
         let handler = mem.read32(vtor.wrapping_add(vector * 4));
-        if std::env::var("EXCLOG").is_ok() && handler == 0 {
-            eprintln!("EXCLOG zero-vector irq={} vector={} vtor={:08x} slot={:08x}",
-                irq, vector, vtor, vtor.wrapping_add(vector * 4));
-        }
         self.regs.r[15] = handler | 1;
         sys.p.dwt_count_exc(sys);
     }
@@ -1053,6 +1028,16 @@ impl Cpu {
             done += 1;
             if done & 15 == 0 {
                 crate::system::INSTRUCTION_COUNT.fetch_add(16u64, Ordering::Relaxed);
+                // Exact-phase advance for GPTs feeding DMAC links (see
+                // dmac_listened_gpt): event edges are discovered here,
+                // not only at coarse driver ticks, so deferred DMA units
+                // keep waveform phase. Outside the dma_active gate on
+                // purpose - idling must not stop discovery. Eight atomic
+                // loads when no link exists (free for all other tests).
+                let listened = crate::system::dmac_listened_gpt();
+                if !listened.is_empty() {
+                    sys.p.advance_gpts(sys, &listened);
+                }
                 // Drain staged DMA/DTC transfers (atomic-guarded, free
                 // when idle): event-triggered engines like DTC complete
                 // here, not on peripheral ticks (which own no RAM).

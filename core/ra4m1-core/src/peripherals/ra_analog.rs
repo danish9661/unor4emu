@@ -149,3 +149,55 @@ impl Peripheral for RaDac {
         }
     }
 }
+
+// RA4M1 DAC8 (8-bit D/A, real base 0x4009E000): DACS[2]+0x00/0x01 store
+// data, DAM+0x03 (DACE0 b4, DACE1 b5) enables output. No Arduino
+// consumer (DAC8_HOWMANY=0, AnalogWave uses DAC12): retained values,
+// readable back, output gated by DACE like silicon.
+pub struct RaDac8 {
+    dacs: [u8; 2],
+    dam: u8,
+}
+
+impl RaDac8 {
+    pub fn new() -> Option<Box<dyn Peripheral>> {
+        Some(Box::new(Self { dacs: [0; 2], dam: 0 }))
+    }
+    /// Converted output byte (0 while its DACE enable is clear).
+    pub fn output(&self, ch: usize) -> u8 {
+        if ch < 2 && self.dam & (1 << (4 + ch)) != 0 {
+            self.dacs[ch]
+        } else {
+            0
+        }
+    }
+}
+
+impl Peripheral for RaDac8 {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+        // Aligned pack (the bus right-shifts sub-word reads): DACS0,
+        // DACS1, reserved, DAM.
+        match offset & !3 {
+            0x00 => (self.dacs[0] as u32) | ((self.dacs[1] as u32) << 8) | ((self.dam as u32) << 24),
+            _ => 0,
+        }
+    }
+    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+        self.write_sized(_sys, offset, value, 0, 4);
+    }
+    fn write_sized(&mut self, _sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        let base = (offset & !3) as usize;
+        for i in 0..size as usize {
+            if byte_offset as usize + i >= 4 { continue; }
+            let idx = base + byte_offset as usize + i;
+            let v = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
+            match idx {
+                0x00 => self.dacs[0] = v,
+                0x01 => self.dacs[1] = v,
+                0x03 => self.dam = v,
+                _ => {}
+            }
+        }
+    }
+}

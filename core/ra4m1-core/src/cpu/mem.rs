@@ -193,6 +193,9 @@ impl FlatMemory {
         let settings = self.rd_ram_u32(info);
         let src = self.rd_ram_u32(info.wrapping_add(4));
         let dest = self.rd_ram_u32(info.wrapping_add(8));
+        // FSP transfer_info_t real layout: num_blocks low byte at +14,
+        // high byte at +15 (dump: 04 04 -> 0x404 = 1028). +12..+13 are
+        // the (length, chain-transfer) fixed 0 halfword here.
         let length = self.rd_ram_u16(info.wrapping_add(14));
         if length == 0 {
             return;
@@ -277,10 +280,41 @@ impl FlatMemory {
         }
         self.service_dtc();
         loop {
-            let t = match crate::sys().take_memcopy_dma_transfer() {
+            let now = crate::system::instruction_count();
+            let t = match crate::sys().take_due_memcopy_dma_transfer(now) {
                 Some(t) => t,
                 None => break,
             };
+            if t.dma_name == "DMAC_EV" {
+                if std::env::var("DMAEVLOG").is_ok() {
+                    eprintln!("SVC ch={} due={} seq={} now={}", t.stream_idx, t.due, t.seq, crate::system::instruction_count());
+                }
+                // RA DMAC event unit: endpoints may be peripheral
+                // registers (GPIO PCNTR3/PCNTR2 for SoftwareSerial).
+                // Executed here in FIFO (due-time) order so TX writes
+                // land before the paired RX reads.
+                let sys = crate::sys();
+                for i in 0..t.size {
+                    let sa = t.src.wrapping_add(i as u32);
+                    let v = if self.in_ram(sa) {
+                        self.read_ram_byte(sa)
+                    } else {
+                        sys.p.read(sys, sa, 1) as u8
+                    };
+                    let da = t.dst.wrapping_add(i as u32);
+                    if self.in_ram(da) {
+                        self.write_ram_byte(da, v);
+                    } else {
+                        sys.p.write(sys, da, 1, v as u32);
+                    }
+                }
+                crate::system::dmac_unit_done(t.stream_idx);
+                crate::sys().mark_dma_completed(t.stream_idx, true);
+                if std::env::var("DMAEVLOG").is_ok() && t.stream_idx == 0 {
+                    eprintln!("RXVAL due={} dst={:#x}", t.due, t.dst);
+                }
+                continue;
+            }
             // memmove semantics via a temp buffer (src/dst may overlap).
             let mut buf = Vec::with_capacity(t.size);
             for i in 0..t.size {
@@ -291,7 +325,11 @@ impl FlatMemory {
             }
             crate::sys().mark_dma_completed(t.stream_idx, true);
         }
-        crate::system::dma_idle();
+        // Stay active while future-dated units remain (they become due
+        // as the run loop advances); idle only on a drained queue.
+        if !crate::sys().has_pending_memcopy() {
+            crate::system::dma_idle();
+        }
     }
     /// Fetch one byte without any MPU check (execute permission belongs to
     /// the loop-top XN check). Unmapped bytes pend an execute-class bus
