@@ -68,6 +68,15 @@ pub fn init_ra4m1() {
     set_sys(WasmSystem::new_ra4m1());
 }
 
+/// Initialize the emulator with the EK-RA4M1 target (same RA4M1 silicon
+/// and peripheral map as Minima; board conventions differ: flash boots
+/// at 0x00000000 with no Arduino bootloader, user LED1 is on P106).
+#[wasm_bindgen]
+pub fn init_ek_ra4m1() {
+    console_error_panic_hook::set_once();
+    set_sys(WasmSystem::new_ek_ra4m1());
+}
+
 /// Initialize the emulator from an SVD XML string (e.g., STM32F407.svd).
 /// Must be called after adding all ext devices (add_spi_flash, add_i2c_eeprom).
 #[wasm_bindgen]
@@ -645,6 +654,11 @@ pub struct WasmCpu { cpu: Cpu, mem: FlatMemory }
 impl WasmCpu {
     #[wasm_bindgen(constructor)]
     pub fn new(sp: u32, pc: u32, flash_size: u32, ram_size: u32) -> Self { Self { cpu: Cpu::new(sp, pc), mem: FlatMemory::new(flash_size as usize, ram_size as usize) } }
+    /// EK-RA4M1 constructor: same RA4M1 map as Minima; boot from the
+    /// zero vector table (no APP_BASE offset), LED1 is P106.
+    pub fn new_ek_ra4m1(sp: u32, pc: u32) -> Self {
+        Self::new_ra4m1(sp, pc)
+    }
     /// RA4M1 constructor: 256KB flash at 0x00000000, 32KB SRAM at 0x20000000.
     pub fn new_ra4m1(sp: u32, pc: u32) -> Self {
         let mut mem = FlatMemory::new(

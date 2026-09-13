@@ -60,6 +60,9 @@ h1 span { color: var(--teal); font-weight: 600; }
 }
 .card-title { font-weight: 700; letter-spacing: .4px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
 .card-title.small { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 1.2px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.seg-btn { background: transparent; border: 0; color: var(--dim); font-weight: 700; font-size: 12px; padding: 5px 12px; cursor: pointer; }
+.seg-btn.active { background: #0a3f38; color: var(--teal); }
 .mono { font-family: var(--mono); }
 .state { font-size: 11px; padding: 3px 10px; border-radius: 12px; text-transform: uppercase; letter-spacing: 1px; }
 .state.paused { background: #2a3440; color: var(--dim); }

@@ -20,14 +20,18 @@
   <div class="badges">
     <span class="badge">R7FA4M1AB3CFM</span>
     <span class="badge">Cortex-M4F @ 48MHz</span>
-    <span class="badge ok">198 proofs green</span>
+    <span class="badge ok">204 proofs green</span>
     <span class="badge" id="wasm-size">228 KB wasm</span>
   </div>
 </header>
 
 <main class="layout">
   <section class="card board-card">
-    <div class="card-title">Board <span id="run-state" class="state paused">paused</span></div>
+    <div class="card-title">Board
+      <span class="seg" role="group" aria-label="board target">
+        <button id="tgt-minima" class="seg-btn active">Minima</button><button id="tgt-ek" class="seg-btn">EK-RA4M1</button>
+      </span>
+      <span id="run-state" class="state paused">paused</span></div>
     <div class="board-wrap">
       <svg class="board" viewBox="0 0 340 240" role="img" aria-label="UNO R4 Minima board">
         <defs>
@@ -88,10 +92,14 @@
       <button class="tab" data-tab="aw" role="tab">analogWrite</button>
       <button class="tab" data-tab="tone" role="tab">tone</button>
       <button class="tab" data-tab="sser" role="tab">SoftSerial</button>
+      <button class="tab" data-tab="rtcalm" role="tab">RTC alarm</button>
+      <button class="tab" data-tab="canbo" role="tab">CAN err</button>
+      <button class="tab" data-tab="misc" role="tab">CAN1·DAC8·KINT·SSI</button>
       <button class="tab" data-tab="rtc" role="tab">RTC</button>
       <button class="tab" data-tab="ctsu" role="tab">CTSU</button>
       <button class="tab" data-tab="hid" role="tab">HID</button>
       <button class="tab" data-tab="matrix" role="tab">Matrix</button>
+      <button class="tab" data-tab="ek" role="tab">EK-RA4M1</button>
       <button class="tab" data-tab="docs" role="tab">Docs</button>
     </div>
 
@@ -208,6 +216,33 @@
       <div id="sser-verdict" class="term small"></div>
     </div>
 
+    <div class="tabpane" id="pane-rtcalm">
+      <p class="desc">Real ArduinoCore <span class="mono">RTC.setAlarmCallback</span> (seconds-match at :00): the sketch sets 11:59:55 and the alarm callback lights D13 when the match crosses. The register verdict is edge-latched — one IRQ per :00 crossing, not a level re-fire.</p>
+      <div class="row">
+        <button id="btn-rtcalm-run" class="btn-acc">Run RTC alarm demo</button>
+      </div>
+      <ol id="rtcalm-steps" class="enum"></ol>
+      <div id="rtcalm-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-canbo">
+      <p class="desc">CAN bus-off recovery on the real Arduino_CAN stack: the sketch transmits in a loop and checks <span class="mono">isError()</span>. The page injects a TX error storm (TEC saturates, BOEF latches), recovers via halt&rarr;operation (counters reset, TX completes again). The LED is the verdict.</p>
+      <div class="row">
+        <button id="btn-canbo-run" class="btn-acc">Run CAN error demo</button>
+      </div>
+      <ol id="canbo-steps" class="enum"></ol>
+      <div id="canbo-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-misc">
+      <p class="desc">Four small bare-metal proofs with no Arduino consumer, each ending on the LED: CAN1 polled self-test loopback (no ELC events on CAN1), DAC8 retain + DAM gate, KINT key-3 press via the virtual key jig, SSI0 TX-drain/RX-pattern round-trip. One runner, four verdicts.</p>
+      <div class="row">
+        <button id="btn-misc-run" class="btn-acc">Run CAN1·DAC8·KINT·SSI demo</button>
+      </div>
+      <ol id="misc-steps" class="enum"></ol>
+      <div id="misc-verdict" class="term small"></div>
+    </div>
+
     <div class="tabpane" id="pane-rtc">
       <p class="desc">Real-time clock on real FSP: the sketch sets 11:59:58 and the core ticks seconds. The clock below is read live from the BCD counters — watch it roll over to 12:00.</p>
       <div class="row">
@@ -247,8 +282,17 @@
       <div id="matrix-verdict" class="term small"></div>
     </div>
 
+    <div class="tabpane" id="pane-ek">
+      <p class="desc">Bare-metal EK-RA4M1 target (R7FA4M1AB3CFP, same RA4M1 silicon as Minima in a 100-pin LQFP): no Arduino bootloader — flash boots at <span class="mono">0x00000000</span> — and the user LED1 is on <span class="mono">P106</span> (EK manual &sect;5.4.4), not Minima's P111/D13. This runs the zero-boot P106 proof live; flip the Board selector above to EK-RA4M1 to watch LED1 follow PORT1.6 on the grid.</p>
+      <div class="row">
+        <button id="btn-ek-run" class="btn-acc">Run EK-RA4M1 demo</button>
+      </div>
+      <ol id="ek-steps" class="enum"></ol>
+      <div id="ek-verdict" class="term small"></div>
+    </div>
+
     <div class="tabpane" id="pane-docs">
-      <p class="desc">What this emulator covers: every row is a feature of the Arduino UNO R4 Minima variant (RA4M1), whether the silicon has it, what the emulator does with it, and how it is proven. Full proofs live in the repo (<span class="mono">cargo test</span>, 198 + 70 green).</p>
+      <p class="desc">What this emulator covers: every row is a feature of the Arduino UNO R4 Minima variant (RA4M1), whether the silicon has it, what the emulator does with it, and how it is proven. Full proofs live in the repo (<span class="mono">cargo test</span>, 204 + 77 green).</p>
       <div class="doctable-wrap"><table class="doctable">
         <thead><tr><th>Feature</th><th>Minima HW</th><th>Status</th><th>Proof / note</th></tr></thead>
         <tbody>
@@ -292,13 +336,9 @@
         <tr><td>USB MSC storage</td><td>no</td><td class="st-no">Left</td><td>no Arduino lib; CFG_TUD_MSC=0</td></tr>
         <tr><td>FAT / LittleFS on-chip</td><td>constrained</td><td class="st-no">Left</td><td>FAT needs ≥32KB; LFS metadata exceeds 8KB dataflash</td></tr>
         <tr><td>SDHI 4-bit SD host</td><td>no (not on RA4M1)</td><td class="st-no">Left</td><td>no peripheral; SDCard lib unpackaged</td></tr>
-        <tr><td>CAN1 mailbox</td><td>yes (no ELC events)</td><td class="st-done">Done</td><td>polled self-test loopback proof</td></tr>
-        <tr><td>DAC8 8-bit</td><td>yes (no Arduino API)</td><td class="st-done">Done</td><td>retain + DAM gate proof</td></tr>
-        <tr><td>TSN calibration</td><td>yes</td><td class="st-done">Done</td><td>fixed trim constants proof</td></tr>
-        <tr><td>SLCDC segment LCD</td><td>yes (no panel)</td><td class="st-done">Done</td><td>regs + 64B display RAM proof</td></tr>
-        <tr><td>KINT key interrupt</td><td>yes</td><td class="st-done">Done</td><td>key-press jig into event 69 + proof</td></tr>
-        <tr><td>SSI0 audio FIFO</td><td>yes (I2S lib broken)</td><td class="st-done">Done</td><td>TX drain + RX pattern proof</td></tr>
-        <tr><td>LED matrix 12x8</td><td>GPIO-driven</td><td class="st-done">Done</td><td>charlieplex render; smiley proof + Matrix tab</td></tr>
+        <tr><td>RTC alarm (Arduino lib)</td><td>yes</td><td class="st-done">Done</td><td>setAlarmCallback :00 match + callback; RTC alarm tab</td></tr>
+        <tr><td>CAN bus-off recovery</td><td>yes</td><td class="st-done">Done</td><td>BOEF + halt-clear + TX again; CAN err tab</td></tr>
+        <tr><td>EK-RA4M1 bare-metal target</td><td>eval kit (same silicon)</td><td class="st-done">Done</td><td>zero-boot + P106 LED1; EK-RA4M1 tab + board selector</td></tr>
         <tr><td>WiFi / ESP32-S3</td><td>WiFi board only</td><td class="st-part">Parked</td><td>waiting on S3 code</td></tr>
         <tr><td>CAN1 / DAC8 / TSN / LCD / KINT</td><td>no / unused</td><td class="st-part">Unmapped</td><td>deliberate; Arduino boot touches none</td></tr>
         </tbody>
@@ -311,7 +351,7 @@
 </main>
 
 <footer>
-  <span>RA4M1 peripheral models proven against arduino-cli firmware (198 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (204 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
 </footer>
 
 <script type="module" src="app.js"></script>

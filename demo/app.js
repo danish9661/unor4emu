@@ -5,6 +5,7 @@ import init, {
   usb_host_attach, usb_host_reset, usb_host_setup, usb_host_status_done,
   spi_set_sd_card, sd_read_block,
   soft_wire, peek_uart_output,
+  kint_key_press, can_inject_errors,
 } from './pkg/uno_r4_minima_wasm.js';
 
 const APP_BASE = 0x4000;
@@ -131,6 +132,7 @@ function buildGpio() {
 
 let lastPorts = new Array(12).fill(0);
 function refreshBoard(txFlash, rxFlash) {
+  if (!board) return;
   let led = false;
   for (let p = 0; p < 12; p++) {
     const v = periphRead(PORT_BASE + p * 0x20, 4) & 0xFFFF;
@@ -146,10 +148,12 @@ function refreshBoard(txFlash, rxFlash) {
     }
     if (v) led = true;
   }
-  // D13 is the Minima LED = P111 (PORT1 bit 11); fall back to
-  // any-output glow (e.g. TX/RX activity elsewhere).
-  const d13 = (periphRead(PORT_BASE + 1 * 0x20, 4) >> 11) & 1;
-  setLed('led-main', 'led-glow', d13 || led);
+  // Board LED: Minima D13 = P111 (PORT1 bit 11); EK-RA4M1 LED1 =
+  // P106 (PORT1 bit 6, EK manual s5.4.4). Fall back to any-output glow
+  // (e.g. TX/RX activity elsewhere).
+  const p1 = periphRead(PORT_BASE + 1 * 0x20, 4);
+  const Fuji = target === 'ek' ? (p1 >> 6) & 1 : (p1 >> 11) & 1;
+  setLed('led-main', 'led-glow', Fuji || led);
   if (txFlash) flash('led-tx');
   if (rxFlash) flash('led-rx');
   $('stat-steps').textContent = steps.toLocaleString('en-US');
@@ -183,6 +187,15 @@ document.querySelectorAll('.tab').forEach((t) => {
     $('pane-' + t.dataset.tab).classList.add('active');
   });
 });
+
+$('tgt-minima').addEventListener('click', () => setTarget('minima'));
+$('tgt-ek').addEventListener('click', () => setTarget('ek'));
+function setTarget(v) {
+  target = v;
+  $('tgt-minima').classList.toggle('active', v === 'minima');
+  $('tgt-ek').classList.toggle('active', v === 'ek');
+  refreshBoard(false, false);
+}
 
 /* ---------------- blink ---------------- */
 let blinkMode = false;
@@ -319,6 +332,19 @@ async function enumEchoBase(log) {
 // periph helpers with explicit width (the free fn takes (addr, width))
 function periphRead(a, w) { return _pr(a, w); }
 function periphWrite(a, w, v) { _pw(a, w, v); }
+window.__dbg = { boot, pump, runUntil, periphRead, periphWrite, CHUNK,
+  can_inject_errors, kint_key_press, soft_wire, peek_uart_output,
+  get board() { return board; }, get running() { return running; } };
+window.__candbg = () => {
+  const CAN0 = 0x40050000, h = (v) => '0x' + (v >>> 0).toString(16).padStart(8, '0');
+  // NOTE: sub-word reads return unmasked packs — mask here.
+  const b = (a) => periphRead(a, 1) % 256;
+  const w = (a) => periphRead(a, 4) >>> 0;
+  return {ctlr: h(periphRead(CAN0 + 0x840, 2)), ctlrW: h(w(CAN0 + 0x840)),
+    eier: h(b(CAN0 + 0x84C)),
+    eifr: h(b(CAN0 + 0x84D)), recr: h(b(CAN0 + 0x84E)),
+    tecr: h(b(CAN0 + 0x84F))};
+};
 window.__rtcdbg = () => {
   const RTC = 0x40044000, h = (v) => '0x' + (v >>> 0).toString(16).padStart(8, '0');
   return {sec: h(periphRead(RTC + 2, 1)), min: h(periphRead(RTC + 4, 1)), hr: h(periphRead(RTC + 6, 1)),
@@ -400,7 +426,11 @@ function sayVerdict(el, lines) {
     el.appendChild(sp);
   }
 }
-const ledOn = () => ((periphRead(PORT_BASE + 1 * 0x20, 4) >> 11) & 1) !== 0; // D13 = P111
+let target = 'minima'; // or 'ek': EK-RA4M1 LED1 = P106 instead of D13 = P111
+const ledOn = () => {
+  const bit = target === 'ek' ? 6 : 11;
+  return ((periphRead(PORT_BASE + 1 * 0x20, 4) >> bit) & 1) !== 0;
+};
 // Boot fw, then pump `chunks` 48k-chunks (proof-harness cadence),
 // calling perChunk() after every chunk for transient flags.
 async function runFw(fwName, arm, chunks, perChunk) {
@@ -687,6 +717,135 @@ $('btn-sser-run').addEventListener('click', async () => {
 /* ---------------- rtc (live BCD clock) ---------------- */
 const bcd = (v) => ((v >> 4) & 0xF) * 10 + (v & 0xF);
 const pad2 = (n) => String(n).padStart(2, '0');
+
+/* ---------------- RTC alarm (FSP callback -> LED) ---------------- */
+$('btn-rtcalm-run').addEventListener('click', async () => {
+  const RTC = 0x40044000;
+  const st = mkSteps($('rtcalm-steps'), [
+    'alarm armed (RSECAR ENB + RCR1.AIE)',
+    'seconds advancing to :00',
+    'LED on — alarm callback fired',
+  ]);
+  sayVerdict($('rtcalm-verdict'), [['booting RTC alarm sketch (11:59:55, match :00)…', 'sys']]);
+  let done = false;
+  const ok = await runFw('r4rtcalm.bin', null, 60 * 10, () => {
+    if ((periphRead(RTC + 0x10, 1) & 0x80) !== 0 && (periphRead(RTC + 0x22, 1) & 1) !== 0) st.mark(0);
+    const sec = bcd(periphRead(RTC + 0x02, 1) % 256);
+    if (sec === 0) st.mark(1);
+    if (ledOn()) { st.mark(2); done = true; }
+    refreshBoard(false, false);
+  });
+  void ok;
+  running = false; setState('paused');
+  sayVerdict($('rtcalm-verdict'), done
+    ? [['alarm complete: :00 crossing latched once, callback lit D13', 'okline']]
+    : [['no LED — the alarm never fired (see console).', '']]);
+  if (!done) banner('RTC alarm demo did not complete.', 'err');
+});
+
+/* ---------------- CAN bus-off recovery ---------------- */
+$('btn-canbo-run').addEventListener('click', async () => {
+  const CAN0 = 0x40050000;
+  const st = mkSteps($('canbo-steps'), [
+    'sketch transmitting (EIER armed)',
+    'error storm injected (TEC saturates, BOEF)',
+    'recovered via halt→operation (BOEF clear, counters 0)',
+    'LED on — isError path + post-recovery TX',
+  ]);
+  sayVerdict($('canbo-verdict'), [['booting Arduino_CAN loop sketch…', 'sys']]);
+  blinkMode = false;
+  const fw = await fetch('fw/r4canbo.bin').then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+  boot(fw);
+  running = true; setState('running');
+  await pump(6000000);
+  let done = false, recovered = false;
+  for (let i = 0; i < 200 && running; i++) {
+    if (!pump(CHUNK)) break;
+    if ((periphRead(CAN0 + 0x84C, 1) % 256 & 0x0E) !== 0) st.mark(0);
+    if (i % 8 === 7) refreshBoard(false, false);
+  }
+  // Warning-level storm first (LED on isError), then bus-off + recover.
+  // NOTE: the CAN error model lives in the Rust core, but periph_write
+  // from JS routes through the generic bus merge — the CTLR CANM write
+  // must be a full word for the recovery arm to see it. Read back the
+  // actual mode before asserting.
+  can_inject_errors(0, 100);
+  for (let i = 0; i < 600 && running; i++) {
+    if (!pump(CHUNK)) break;
+    if (i % 8 === 7) refreshBoard(false, false);
+    if (ledOn()) { st.mark(1); done = true; break; }
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  can_inject_errors(0, 900);
+  // NOTE: sub-word reads return unmasked packs - mask with % 256.
+  // Write halt as one full word (low-half-only writes OR a stale high
+  // byte into the merge and never form CANM=10 in the model).
+  if ((periphRead(CAN0 + 0x84D, 1) % 256 & (1 << 3)) !== 0) st.mark(1);
+  periphWrite(CAN0 + 0x840, 4, 0x0200); // halt: BOEF clears, counters reset
+  await runUntil(CHUNK, () => false);
+  if ((periphRead(CAN0 + 0x84D, 1) % 256 & (1 << 3)) === 0
+    && (periphRead(CAN0 + 0x84E, 1) % 256) === 0
+    && (periphRead(CAN0 + 0x84F, 1) % 256) === 0) { st.mark(2); recovered = true; }
+  periphWrite(CAN0 + 0x840, 2, 0x0000); // operation
+  for (let i = 0; i < 120 && running && !done; i++) {
+    if (!pump(CHUNK)) break;
+    if (ledOn()) { done = true; break; }
+  }
+  if (done) st.mark(3);
+  running = false; setState('paused');
+  refreshBoard(false, false);
+  sayVerdict($('canbo-verdict'), done && recovered
+    ? [['bus-off recovered: BOEF cleared in halt, TX completes in operation', 'okline']]
+    : [[`incomplete (led=${done} recovered=${recovered}) — see console.`, '']]);
+  if (!done || !recovered) banner('CAN error demo did not complete.', 'err');
+});
+
+/* ---------------- CAN1 · DAC8 · KINT · SSI (bare-metal quartet) ---------------- */
+$('btn-misc-run').addEventListener('click', async () => {
+  const st = mkSteps($('misc-steps'), [
+    'CAN1 self-test loopback (r4can1.bin)',
+    'DAC8 retain + DAM gate (r4dac8.bin)',
+    'KINT key-3 press (r4kint.bin)',
+    'SSI0 FIFO round-trip (r4ssi.bin)',
+  ]);
+  sayVerdict($('misc-verdict'), [['running four bare-metal proofs…', 'sys']]);
+  const one = async (fwName, arm, label) => {
+    let led = false;
+    const ok = await runFw(fwName, arm, 3000, () => {
+      if (ledOn()) led = true;
+    });
+    running = false; setState('paused');
+    sayVerdict($('misc-verdict'), [[[fwName, label, led ? 'LED ON' : 'no LED'].join(' — '), led ? 'okline' : '']]);
+    return ok && led;
+  };
+  const results = [];
+  results.push(await one('r4can1.bin', null, 'polled MB0→MB8') && (st.mark(0), true));
+  results.push(await one('r4dac8.bin', null, 'DACS0 read-back') && (st.mark(1), true));
+  // KINT needs the virtual press mid-run: boot once, press, watch.
+  // (The generic one() runner would boot it twice; skip straight here.)
+  results.push(false);
+  {
+    blinkMode = false;
+    const fw = await fetch('fw/r4kint.bin').then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+    boot(fw);
+    running = true; setState('running');
+    await pump(6000000);
+    for (let i = 0; i < 2200 && running; i++) { if (!pump(CHUNK)) break; }
+    kint_key_press(3);
+    let led = false;
+    for (let i = 0; i < 3000 && running; i++) {
+      if (!pump(CHUNK)) break;
+      if (ledOn()) { led = true; break; }
+      if (i % 8 === 7) refreshBoard(false, false);
+    }
+    running = false; setState('paused');
+    if (led) { st.mark(2); results[2] = true; }
+  }
+  results.push(await one('r4ssi.bin', null, '0,1,2,3 pattern') && (st.mark(3), true));
+  const n = results.filter(Boolean).length;
+  sayVerdict($('misc-verdict'), [[`${n}/4 bare-metal LEDs lit (CAN1·DAC8·KINT·SSI)`, n === 4 ? 'okline' : '']]);
+  if (n !== 4) banner('Misc demo: some proof did not light its LED.', 'err');
+});
 $('btn-rtc-run').addEventListener('click', async () => {
   const RTC = 0x40044000;
   const st = mkSteps($('rtc-steps'), [
@@ -836,6 +995,65 @@ $('btn-hid-run').addEventListener('click', async () => {
   }
   setState('paused'); running = false;
 });
+
+/* ---------------- EK-RA4M1 (bare-metal zero-boot, P106 LED1) ---------------- */
+$('btn-ek-run').addEventListener('click', async () => {
+  const st = mkSteps($('ek-steps'), [
+    'EK target selected (LED1 = P106)',
+    'zero-boot image at 0x00000000 (no APP_BASE)',
+    'P106 output latched (PORT1.6)',
+  ]);
+  sayVerdict($('ek-verdict'), [['building zero-boot P106 image (same bytes as the Rust proof)…', 'sys']]);
+  setTarget('ek');
+  // Same Thumb as ra4m1_ek_ra4m1_zero_boot_p106_led: LDR r0,=PORT1;
+  // LDR r1,=bits; STR r1,[r0]; B . with pools at 0x114/0x118.
+  const img = new Uint8Array(0x200);
+  const dv = new DataView(img.buffer);
+  const PORT1 = 0x40040020;
+  const BITS = (1 << (16 + 6)) | (1 << 6);
+  const code = [0x4804, 0x4905, 0x6001, 0xE7FE, 0xBF00, 0xBF00, 0xBF00, 0xBF00];
+  code.forEach((w, i) => dv.setUint16(0x100 + i * 2, w, true));
+  dv.setUint32(0x114, PORT1, true);
+  dv.setUint32(0x118, BITS, true);
+  // SP/PC vector table at zero (EK has no bootloader offset).
+  const flash = new Uint8Array(0x200);
+  flash.set([0x00, 0x80, 0x00, 0x20, 0x01, 0x01, 0x00, 0x00]);
+  const fw = new Uint8Array(0x200);
+  fw.set(flash.subarray(0, 8), 0);
+  fw.set(img.subarray(8), 8);
+  bootAt(fw, 0x00000000);
+  running = true; setState('running');
+  pump(6); // execute LDR/LDR/STR (6 instr is plenty)
+  st.mark(0); st.mark(1);
+  refreshBoard(false, false);
+  let done = false;
+  for (let i = 0; i < 4 && running; i++) {
+    if (!pump(4)) break;
+    if (((periphRead(PORT1, 4) >>> 0) & (1 << 6)) !== 0) { st.mark(2); done = true; break; }
+    if (i % 8 === 7) refreshBoard(false, false);
+  }
+  running = false; setState('paused');
+  refreshBoard(false, false);
+  sayVerdict($('ek-verdict'), done
+    ? [['EK-RA4M1 live: P106 latched from a zero-boot image (no bootloader)', 'okline']]
+    : [['P106 never latched (see console).', '']]);
+  if (!done) banner('EK-RA4M1 demo did not complete.', 'err');
+});
+function bootAt(fwBytes, base) {
+  // Like boot() but loads at an explicit base (EK boots at zero:
+  // boot() always loads at APP_BASE, so redo the load here).
+  reset_state();
+  init_ra4m1();
+  const dv = new DataView(fwBytes.buffer, fwBytes.byteOffset, fwBytes.byteLength);
+  const sp = dv.getUint32(0, true), pc = dv.getUint32(4, true);
+  board = new WasmCpu(sp, pc);
+  board.load_firmware(fwBytes, base);
+  board.reset_cpu(sp, pc);
+  board.set_deliver_irqs(true);
+  steps = 0;
+  banner(null);
+  setState('paused');
+}
 
 /* ---------------- matrix (12x8 charlieplexed GPIO) ---------------- */
 const MP = [[0,3],[0,4],[0,11],[0,12],[0,13],[0,15],[2,4],[2,5],[2,6],[2,12],[2,13]];

@@ -1085,6 +1085,15 @@ impl WasmSystem {
         WasmSystem { p, pending_dma: RefCell::new(Vec::new()) }
     }
 
+
+    /// EK-RA4M1 evaluation-kit target (R7FA4M1AB3CFP, same RA4M1 silicon
+    /// as Minima's R7FA4M1AB3CFM in a 100-pin LQFP): identical peripheral
+    /// map and base addresses. The difference is board-level, not model
+    /// level: no Arduino bootloader (flash boots at 0x00000000, APP_BASE
+    /// is unused), the user LED is on P106 (not Minima's P111/D13), and
+    /// P205 is TSCAP-A by default (E12 open). Constructor alias so
+    /// bare-metal EK firmware (LED1 on P106, J2-header pins) boots
+    /// without dragging the Arduino APP_BASE convention along.
     pub fn new_ra4m1() -> Self {
         let gpio = GpioPorts::default();
         let ext = get_ext_devices().lock().unwrap();
@@ -1107,6 +1116,13 @@ impl WasmSystem {
             };
             SoftwareSpi::register(config, &mut p.gpio.borrow_mut(), &ext_devices);
         }
+    }
+
+    /// EK-RA4M1 target: same silicon/map as Minima; board differences
+    /// (zero-boot, P106 LED, TSCAP P205) are caller conventions, not
+    /// model changes. See new_ra4m1 docs.
+    pub fn new_ek_ra4m1() -> Self {
+        Self::new_ra4m1()
     }
 
     pub fn queue_dma_transfer(&self, t: DmaTransfer) {

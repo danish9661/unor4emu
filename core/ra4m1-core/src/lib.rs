@@ -39,6 +39,15 @@ pub fn init_ra4m1() {
     set_sys(WasmSystem::new_ra4m1());
 }
 
+/// Initialize the emulator with the EK-RA4M1 target (same RA4M1 silicon
+/// and peripheral map as Minima; board conventions differ: flash boots
+/// at 0x00000000 with no Arduino bootloader, user LED1 is on P106).
+#[wasm_bindgen]
+pub fn init_ek_ra4m1() {
+    console_error_panic_hook::set_once();
+    set_sys(WasmSystem::new_ek_ra4m1());
+}
+
 /// Clear all process-lifetime globals so a NEW emulator instance starts
 /// clean. Must be called before creating that instance.
 #[wasm_bindgen]
@@ -155,6 +164,20 @@ pub fn icu_pin_edge(line: u8, falling: bool) -> bool {
     system::icu_pin_edge(sys(), line as usize, falling)
 }
 
+/// Inject a key press on KINT KR `key` (virtual key matrix for the
+/// key-return controller). Returns whether it fired (controller enabled).
+#[wasm_bindgen]
+pub fn kint_key_press(key: u8) -> bool {
+    system::kint_key_press(sys(), key as usize)
+}
+
+/// Test-jig CAN error injection: stuff `rx` receive / `tx` transmit
+/// errors into CAN0's counters (EWF/EPF/BOEF + ERI event per EIER).
+#[wasm_bindgen]
+pub fn can_inject_errors(rx: u16, tx: u16) {
+    system::can_inject_errors(sys(), rx, tx);
+}
+
 /// Wire a TX pin to an RX pin for the SoftwareSerial loopback demo
 /// (TX PODR changes mirror into RX PIDR + edge IRQ). Must be called
 /// after `init_ra4m1()` and before booting the `r4sser` firmware:
@@ -252,6 +275,12 @@ use cpu::{Cpu, mem::{FlatMemory, Memory}};
 pub struct WasmCpu { cpu: Cpu, mem: FlatMemory }
 #[wasm_bindgen]
 impl WasmCpu {
+    /// EK-RA4M1 CPU+memory: same RA4M1 map as Minima (256KB flash at
+    /// 0x00000000, 32KB SRAM at 0x20000000). Boot from the zero vector
+    /// table (no APP_BASE offset); LED1 is P106.
+    pub fn new_ek_ra4m1(sp: u32, pc: u32) -> Self {
+        Self::new_ra4m1(sp, pc)
+    }
     /// RA4M1 CPU+memory: 256KB flash at 0x00000000, 32KB SRAM at 0x20000000.
     #[wasm_bindgen(constructor)]
     pub fn new_ra4m1(sp: u32, pc: u32) -> Self {

@@ -71,9 +71,11 @@ impl FlatMemory {
         }
     }
 
+    #[inline(always)]
     fn in_flash(&self, addr: u32) -> bool {
         addr >= self.flash_base && (addr - self.flash_base) < self.flash.len() as u32
     }
+    #[inline(always)]
     fn in_ram(&self, addr: u32) -> bool {
         addr >= self.ram_base && (addr - self.ram_base) < self.ram.len() as u32
     }
@@ -129,6 +131,7 @@ impl FlatMemory {
         }
     }
 
+    #[inline(always)]
     fn read_ram_byte(&self, addr: u32) -> u8 {
         if self.in_ram(addr) {
             self.ram[(addr - self.ram_base) as usize]
@@ -139,6 +142,7 @@ impl FlatMemory {
         }
     }
 
+    #[inline(always)]
     fn write_ram_byte(&mut self, addr: u32, v: u8) {
         if self.in_ram(addr) {
             self.ram[(addr - self.ram_base) as usize] = v;
@@ -168,15 +172,18 @@ impl FlatMemory {
             self.dtc_fire(irq);
         }
     }
+    #[inline(always)]
     fn rd_ram_u32(&self, a: u32) -> u32 {
         (self.read_ram_byte(a) as u32)
             | ((self.read_ram_byte(a.wrapping_add(1)) as u32) << 8)
             | ((self.read_ram_byte(a.wrapping_add(2)) as u32) << 16)
             | ((self.read_ram_byte(a.wrapping_add(3)) as u32) << 24)
     }
+    #[inline(always)]
     fn rd_ram_u16(&self, a: u32) -> u16 {
         (self.read_ram_byte(a) as u16) | ((self.read_ram_byte(a.wrapping_add(1)) as u16) << 8)
     }
+    #[inline(always)]
     fn wr_ram_u32(&mut self, a: u32, v: u32) {
         self.write_ram_byte(a, (v & 0xFF) as u8);
         self.write_ram_byte(a.wrapping_add(1), ((v >> 8) & 0xFF) as u8);
@@ -351,6 +358,7 @@ impl FlatMemory {
     /// True for mapped normal memory (flash/RAM/extra). Periph accesses
     /// return earlier; anything else falls to the bus-fault bad-arms.
     #[inline]
+    #[inline(always)]
     fn mapped(&self, addr: u32) -> bool {
         is_periph(addr) || self.in_flash(addr) || self.in_ram(addr) || self.extra_idx(addr).is_some()
     }
@@ -362,6 +370,7 @@ impl FlatMemory {
     /// Like the MPU data path the faulting access completes dropped and
     /// raises before the next fetch (flags exact, PC deferred by one).
     #[inline]
+    #[inline(always)]
     fn unaligned_deny(&self, addr: u32, size: u32) -> bool {
         if !self.mapped(addr) {
             return false;
@@ -383,6 +392,7 @@ impl FlatMemory {
     /// when the MPU is off; unmapped addresses never reach here (callers
     /// check mapped-ness first and keep the legacy bad-address behavior).
     #[inline]
+    #[inline(always)]
     fn mpu_deny(&self, addr: u32, size: u32, write: bool) -> bool {
         if !crate::system::is_mpu_enabled() {
             return false;
@@ -446,6 +456,27 @@ impl Memory for FlatMemory {
             // permission (and reports the correct IACCVIOL-class fault).
             return crate::sys().p.read(crate::sys(), addr, 2) as u16;
         }
+        // Fast path: both bytes inside one region (the common case).
+        // Falls back to the byte-wise faulting path at region edges.
+        let lo = addr;
+        let hi = addr.wrapping_add(1);
+        if self.in_flash(lo) {
+            if self.in_flash(hi) {
+                let b = (addr - self.flash_base) as usize;
+                return (self.flash[b] as u16) | ((self.flash[b + 1] as u16) << 8);
+            }
+        } else if self.in_ram(lo) {
+            if self.in_ram(hi) {
+                let b = (addr - self.ram_base) as usize;
+                return (self.ram[b] as u16) | ((self.ram[b + 1] as u16) << 8);
+            }
+        } else if let Some(idx) = self.extra_idx(lo) {
+            let r = &self.extra[idx];
+            if hi >= r.base && (hi - r.base) < r.data.len() as u32 {
+                let b = (addr - r.base) as usize;
+                return (r.data[b] as u16) | ((r.data[b + 1] as u16) << 8);
+            }
+        }
         // Bounds-checked per byte (a fetch straddling a region end faults
         // on the first unmapped byte instead of panicking the host).
         match (self.fetch_byte(addr), self.fetch_byte(addr.wrapping_add(1))) {
@@ -454,6 +485,11 @@ impl Memory for FlatMemory {
         }
     }
     fn is_mapped(&self, addr: u32) -> bool {
+        // Fast path first (flash/RAM cover all fetches); the full
+        // mapped() adds the periph windows + extra-region linear scan.
+        if self.in_flash(addr) || self.in_ram(addr) {
+            return true;
+        }
         self.mapped(addr)
     }
     fn read16(&self, addr: u32) -> u16 {

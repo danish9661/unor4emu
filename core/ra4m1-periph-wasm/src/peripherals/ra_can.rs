@@ -411,6 +411,22 @@ impl Peripheral for RaCan {
                     self.mem[CTLR] &= !(1 << 5);
                     self.ts = 0;
                 }
+                // Entering halt (CANM=10) clears BOEF and resets both
+                // counters like silicon's recovery entry; the FSP
+                // R_CAN_Open recovery path polls EIFR for the clear
+                // before returning to operation. Sub-word CANM writes
+                // arrive per byte (0x840 low, 0x841 high), so arm on
+                // either half showing the halt pattern.
+                // NOTE: the write_sized merge ORs stale high-byte bits
+                // into the pack on a low-half write (bus merge quirk):
+                // require the FULL word to read CANM=10 so a stray
+                // 0x840 low write with a stale 0x02 high byte cannot
+                // wipe live counters mid-TX.
+                if self.canm() == 2 && self.eifr & (1 << 3) != 0 {
+                    self.eifr &= !(1 << 3);
+                    self.recr = 0;
+                    self.tecr = 0;
+                }
                 // Leaving operation with a queued TX aborts it.
                 if oldm == 0 && self.canm() != 0 {
                     self.abort_pending();

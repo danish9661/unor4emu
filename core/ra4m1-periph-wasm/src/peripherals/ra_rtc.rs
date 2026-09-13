@@ -53,12 +53,18 @@ impl RaRtc {
                 }
             }
             // Alarm: all ENB-gated fields must match, plus RCR1.AIE.
+            // Edge-latched like silicon: fire only on the second the
+            // match becomes true (a level re-fire would re-pend every
+            // tick while the second still matches, starving the alarm
+            // IRQ the sketch's handler just cleared).
             if self.regs[0x22] & 1 != 0 {
                 let pairs = [(0x10, 0x02, 0x7F), (0x12, 0x04, 0x7F), (0x14, 0x06, 0x3F)];
                 if pairs.iter().all(|&(a, c, m)| {
                     self.regs[a] & 0x80 == 0 || (self.regs[a] & m) == (self.regs[c] & m)
                 }) {
-                    crate::system::icu_raise_event(sys, 38); // ELC_EVENT_RTC_ALARM
+                    if secs > 0 {
+                        crate::system::icu_raise_event(sys, 38); // ELC_EVENT_RTC_ALARM
+                    }
                 }
             }
         }
