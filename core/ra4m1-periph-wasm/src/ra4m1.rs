@@ -35,6 +35,7 @@ pub const DAC8_BASE: u32 = 0x4009_E000;
 pub const SLCDC_BASE: u32 = 0x4008_2000;
 pub const KINT_BASE: u32 = 0x4008_0000;
 pub const SSI0_BASE: u32 = 0x4004_E000;
+pub const SSI1_BASE: u32 = 0x4004_E100;
 pub const IIC0_BASE: u32 = 0x4005_3000;
 pub const IIC1_BASE: u32 = 0x4005_3100;
 pub const SPI0_BASE: u32 = 0x4007_2000;
@@ -1944,6 +1945,55 @@ mod tests {
         sys.tick();
         assert_eq!(sys.p.read(sys, SSI0_BASE + 0x1C, 4), 0, "sample0");
         assert_eq!(sys.p.read(sys, SSI0_BASE + 0x1C, 4), 1, "sample1");
+    }
+
+
+    #[test]
+    fn ra4m1_map_ssi1() {
+        // SSI1 (own slot at 0x4004E100, same R_SSI0_Type): independent
+        // FIFOs from SSI0 — TX drains while TEN runs (TDE), RX streams
+        // the reset-based pattern while REN runs (RDF). Same shape as
+        // the SSI0 register proof; FSP/Arduino use SSI0 only
+        // (BSP_FEATURE_SSI_VALID_CHANNEL_MASK = 1), so no firmware flow.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, SSI1_BASE + 0x10, 4, 0x03); // TFRST+RFRST
+        assert_eq!(sys.p.read(sys, SSI1_BASE + 0x10, 4) & 0x03, 0, "strobe clear");
+        sys.p.write(sys, SSI1_BASE + 0x00, 4, 0x03); // REN+TEN
+        sys.p.write(sys, SSI1_BASE + 0x18, 4, 0xAAAAAAAA);
+        // SSI0 untouched: its FIFO still reads empty/TDE while SSI1 holds data.
+        assert_ne!(sys.p.read(sys, SSI0_BASE + 0x14, 4) & (1 << 16), 0, "SSI0 TDE (empty)");
+        assert_eq!(sys.p.read(sys, SSI1_BASE + 0x14, 4) & (1 << 16), 0, "SSI1 not empty yet");
+        sys.tick(); // TX drains
+        assert_ne!(sys.p.read(sys, SSI1_BASE + 0x14, 4) & (1 << 16), 0, "SSI1 TDE");
+        assert_ne!(sys.p.read(sys, SSI1_BASE + 0x14, 4) & 1, 0, "SSI1 RDF");
+        sys.tick();
+        sys.tick();
+        assert_eq!(sys.p.read(sys, SSI1_BASE + 0x1C, 4), 0, "SSI1 sample0");
+        assert_eq!(sys.p.read(sys, SSI1_BASE + 0x1C, 4), 1, "SSI1 sample1");
+    }
+
+
+    #[test]
+    fn ra4m1_map_gpt_protect_dma() {
+        // GPT OPS (0x40078FF0) + POEG0-3 (0x40042000 stride 0x100) +
+        // R_DMA (0x40005200): safety/controller stubs. Accept-and-retain
+        // (writes read back, outputs never gated, engine stays in
+        // DMAC/DTC): no Arduino consumer, so register-level only.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, 0x4007_8FF0, 4, 0xA5A5_0003); // OPSCR
+        sys.p.write(sys, 0x4004_2000, 4, 0x0000_0010); // POEG0.PIDE
+        sys.p.write(sys, 0x4004_2300, 4, 0x0000_0008); // POEG3.SSF
+        sys.p.write(sys, 0x4000_5200, 1, 0x01); // DMAST.DMST
+        assert_eq!(sys.p.read(sys, 0x4007_8FF0, 4), 0xA5A5_0003, "OPSCR");
+        assert_eq!(sys.p.read(sys, 0x4004_2000, 4) & 0x10, 0x10, "POEG0");
+        assert_eq!(sys.p.read(sys, 0x4004_2300, 4) & 0x08, 0x08, "POEG3");
+        assert_eq!(sys.p.read(sys, 0x4000_5200, 1) & 0xFF, 0x01, "DMAST");
     }
 
     #[test]

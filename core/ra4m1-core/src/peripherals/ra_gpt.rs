@@ -302,3 +302,83 @@ impl Peripheral for RaGpt {
         }
     }
 }
+
+// ---- GPT POEG0-3 (port-output-enable, 0x40042000 stride 0x100) + OPS
+// (output-phase-switch, 0x40078FF0): safety shutdown stubs. Real POEG
+// watches overcurrent/osc-stop/port pins and force-cuts GPT outputs
+// (POEGG, 4B each); OPS switches PWM phases (OPSCR, 4B). Arduino never
+// touches either (no motor/POEG consumer; FSP R_GPT_POEG_Open is never
+// called by any vendored sketch): accept-and-retain so probing writes
+// never fault, outputs never gated. Shares the RaGptOps slot layout:
+// OPS lives at 0x40078FF0 (4B), POEGn at 0x40042000+n*0x100 (4B each).
+pub struct RaGptProtect {
+    regs: [u8; 0x400],
+}
+
+impl RaGptProtect {
+    pub fn new_ops() -> Option<Box<dyn Peripheral>> {
+        Some(Box::new(Self { regs: [0; 0x400] }))
+    }
+    pub fn new_poeg() -> Option<Box<dyn Peripheral>> {
+        Some(Box::new(Self { regs: [0; 0x400] }))
+    }
+}
+
+impl Peripheral for RaGptProtect {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+        let o = (offset & !3) as usize;
+        if o + 4 > self.regs.len() { return 0; }
+        u32::from_le_bytes([self.regs[o], self.regs[o+1], self.regs[o+2], self.regs[o+3]])
+    }
+    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+        self.write_sized(_sys, offset, value, 0, 4);
+    }
+    fn write_sized(&mut self, _sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        let base = (offset & !3) as usize;
+        for i in 0..size as usize {
+            if byte_offset as usize + i >= 4 { continue; }
+            let idx = base + byte_offset as usize + i;
+            if idx >= self.regs.len() { continue; }
+            self.regs[idx] = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
+        }
+    }
+}
+
+// ---- DMA controller (R_DMA, 0x40005200, 0x44B): module-activation +
+// error-status stub. Real regs: DMAST+0x00 (DMST b0 = DMAC operation
+// enable), DMECHR+0x40 (error channel), DMESTS (error status). Arduino
+// never touches R_DMA directly (FSP R_DMAC_Open arms per-channel DTE
+// via DELSR instead): accept-and-retain so R_BSP or HAL probes never
+// fault. The actual transfer engine stays in RaDmac/RaDtc + the mem
+// path. Same slot shape as RaGptProtect (flat retain file).
+pub struct RaDmaCtl {
+    regs: [u8; 0x44],
+}
+
+impl RaDmaCtl {
+    pub fn new() -> Option<Box<dyn Peripheral>> {
+        Some(Box::new(Self { regs: [0; 0x44] }))
+    }
+}
+
+impl Peripheral for RaDmaCtl {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn read(&mut self, _sys: &System, offset: u32) -> u32 {
+        let o = (offset & !3) as usize;
+        if o + 4 > self.regs.len() { return 0; }
+        u32::from_le_bytes([self.regs[o], self.regs[o+1], self.regs[o+2], self.regs[o+3]])
+    }
+    fn write(&mut self, _sys: &System, offset: u32, value: u32) {
+        self.write_sized(_sys, offset, value, 0, 4);
+    }
+    fn write_sized(&mut self, _sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
+        let base = (offset & !3) as usize;
+        for i in 0..size as usize {
+            if byte_offset as usize + i >= 4 { continue; }
+            let idx = base + byte_offset as usize + i;
+            if idx >= self.regs.len() { continue; }
+            self.regs[idx] = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
+        }
+    }
+}

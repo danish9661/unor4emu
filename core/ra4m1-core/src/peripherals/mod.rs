@@ -194,6 +194,18 @@ impl Peripherals {
                 add(base, base + 0x100, x);
             }
         }
+        // GPT OPS (0x40078FF0) + POEG0-3 (0x40042000 stride 0x100):
+        // safety-shutdown stubs (accept-and-retain, outputs never gated;
+        // no Arduino consumer).
+        if let Some(x) = ra_gpt::RaGptProtect::new_ops() { add(0x4007_8FF0, 0x4007_9000, x); }
+        for n in 0..4u32 {
+            if let Some(x) = ra_gpt::RaGptProtect::new_poeg() {
+                add(0x4004_2000 + n * 0x100, 0x4004_2000 + n * 0x100 + 0x100, x);
+            }
+        }
+        // R_DMA controller (0x40005200, DMAST/DMECHR): module-activation
+        // stub (accept-and-retain; the engine stays in DMAC/DTC + mem path).
+        if let Some(x) = ra_gpt::RaDmaCtl::new() { add(0x4000_5200, 0x4000_5300, x); }
         // RA ICU (IELSR event routing)
         if let Some(x) = ra_icu::RaIcu::new() { add(0x4000_6000, 0x4000_6400, x); }
         // RA KINT (key return interrupt -> KEY_INT event 69).
@@ -231,6 +243,7 @@ impl Peripherals {
         if let Some(x) = ra_misc::RaSlcdc::new() { add(0x4008_2000, 0x4008_3000, x); }
         // RA SSI0 (sound; bare-metal proven, Arduino I2S lib broken).
         if let Some(x) = ra_ssi::RaSsi::new() { add(0x4004_E000, 0x4004_E100, x); }
+        if let Some(x) = ra_ssi::RaSsi::new() { add(0x4004_E100, 0x4004_E200, x); }
         // RA CAN0 (mailbox CAN; CAN1 has no routable mailbox events here)
         if let Some(x) = ra_can::RaCan::new_can0() { add(0x4005_0000, 0x4005_1000, x); }
         // CAN1: same mailboxes, no ELC event codes (polled only).

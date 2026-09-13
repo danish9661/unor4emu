@@ -7,8 +7,8 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 204: 128 legacy CPU + 76 R4 proofs)
-  and in `core/ra4m1-core` (77 R4 proofs: 76 mirror + EK zero-boot) and
+  `core/ra4m1-periph-wasm` (currently 206: 128 legacy CPU + 78 R4 proofs)
+  and in `core/ra4m1-core` (79 R4 proofs: 78 mirror + EK zero-boot) and
   `cargo build` green in the top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -26,12 +26,12 @@ disk but is excluded from the workspace until its code is ready.
 - `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
   excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
   STM32 peripherals remain as reference until their RA replacements land.
-  204 tests must stay green (128 legacy CPU + 76 R4 proofs).
+  206 tests must stay green (128 legacy CPU + 78 R4 proofs).
 - `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
   CPU + ARM + RA peripherals, NO STM32 code, deps are only
   `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
   Release WASM is ~225KB vs ~2.1MB for the snapshot core (~9.4x smaller).
-  Its 77 `ra4m1.rs` proofs (76 mirror + EK zero-boot) track the snapshot and must stay green.
+  Its 79 `ra4m1.rs` proofs (78 mirror + EK zero-boot) track the snapshot and must stay green.
 - `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
   `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
   No STM32 and no ESP32 code may ever link here.
@@ -45,9 +45,9 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# snapshot core (204 tests, always single-threaded)
+# snapshot core (206 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# small core (77 R4 proofs)
+# small core (79 R4 proofs)
 cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
@@ -82,6 +82,9 @@ wasm wrappers can path-depend on it).
 | KINT | `0x4008_0000` | `ra_icu.rs` KRCTL/KRF/KRM + `kint_key_press` jig -> KEY_INT event 69 |
 | SLCDC | `0x4008_2000` | `ra_misc.rs` mode regs + 64B display RAM retain (no panel) |
 | SSI0 | `0x4004_E000` | `ra_ssi.rs` TX drain + RX pattern FIFO + TXI/RXI edges (Arduino I2S lib broken, bare-metal proven) |
+| SSI1 | `0x4004_E100` | same model, own slot/FIFOs (FSP mask = SSI0 only, register proof) |
+| GPT OPS/POEG | `0x4007_8FF0`/`0x4004_2000`+n*`0x100` | `ra_gpt.rs` safety stubs (accept-and-retain, register proof) |
+| R_DMA | `0x4000_5200` | `ra_gpt.rs` module-activation stub (register proof) |
 | CAN0 | `0x4005_0000` | `ra_can.rs` mailbox TX/RX + self-test loopback + RX/TX FIFO via MB24 (CAN1: polled-only, same mailboxes, no events) |
 | CAN1 | `0x4005_1000` | same model, eventless (polled SENTDATA/NEWDATA) |
 | DATAFLASH | `0x4010_0000` | `ra_flash.rs` 8KB window, erased `0xFF`, bit-clear writes |
@@ -192,7 +195,7 @@ wasm wrappers can path-depend on it).
   P105 RX IRQ0 via GPT4/GPT5 timers + DMAC0/DMAC1 PCNTR samples + ELC
   GPT_A link + soft_wire jig) are all proven end-to-end on real Arduino
   API with `r4aw`/`r4tone`/`r4sser` bins + `core/blinky/sketches/` sources
-  + demo tabs (17 tabs total).
+  + demo tabs (21 tabs total).
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
 
@@ -229,6 +232,7 @@ wasm wrappers can path-depend on it).
 `ra4m1_map_ssi`, `ra4m1_ssi_ok`, `ra4m1_matrix_ok`, `ra4m1_softserial_ok`,
 `ra4m1_rtc_alarm_ok`, `ra4m1_map_can_busoff_recovery`, `ra4m1_can_busoff_ok`,
 `ra4m1_ek_ra4m1_zero_boot_p106_led` (EK target: same silicon, zero-boot, P106).
+`ra4m1_map_ssi1`, `ra4m1_map_gpt_protect_dma`.
 Keep all green and add one per peripheral using the same shape:
 new_ra4m1 system -> MMIO writes -> tick -> assert state/marker.
 
@@ -259,7 +263,8 @@ at zero executes shifted garbage (looks plausible, faults in an epilogue).
 `core/blinky/r4kint.bin` (KINT key), `core/blinky/r4ssi.bin`
 (SSI audio FIFO), `core/blinky/r4matrix.bin` (LED matrix smiley),
 `core/blinky/r4aw.bin` (analogWrite), `core/blinky/r4tone.bin` (tone),
-`core/blinky/r4sser.bin` (SoftwareSerial) are the vendored
+`core/blinky/r4sser.bin` (SoftwareSerial), `core/blinky/r4rtcalm.bin`
+(RTC alarm), `core/blinky/r4canbo.bin` (CAN bus-off) are the vendored
 USB/I2C/SPI/CAN/touch/HID/SD/DTC/PWM proof builds, compiled the same
 way from their sketches (`core/blinky/sketches/` holds the r4aw/r4tone/
 r4sser sources).
@@ -269,7 +274,7 @@ r4sser sources).
 `./demo/build.sh` then `python3 -m http.server -d demo 8901`: dark
 single page driving the 228KB Minima WASM (`WasmCpu` + the `usb_*` /
 `periph_*` free functions + `spi_set_sd_card`/`sd_read_block` for the
-SD tab). Seventeen tabs run the vendored firmware live: Blink (LED + full
+SD tab). Twenty-one tabs run the vendored firmware live: Blink (LED + full
 12x16 GPIO grid from PORT, plus a MIPS meter in the stats), Serial (in-page virtual-host enumeration
 with step checklist, hello in the terminal), Echo (bulk-pipe discovery
 via PIPECFG + typed round-trip), Wire (IIC1 master vs bare-metal IIC0

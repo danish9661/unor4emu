@@ -1,8 +1,11 @@
 use crate::system::System;
 use super::Peripheral;
 
-// RA4M1 SSI0 (serial sound interface), real base 0x4004E000
-// (R7FA4M1AB.h). Register file:
+// RA4M1 SSI0/SSI1 (serial sound interface), real bases 0x4004E000 /
+// 0x4004E100, same R_SSI0_Type (R7FA4M1AB.h). SSI1 exists in silicon
+// but BSP_FEATURE_SSI_VALID_CHANNEL_MASK = 1, so FSP/Arduino use SSI0
+// only: SSI1 is modeled (own slot, own FIFOs) and proven register-level
+// like the eventless extra channels elsewhere. Register file:
 //   SSICR+0x00 (REN b0, TEN b1), SSISR+0x04 (RO, reads 0), SSIFCR+0x10
 //   (RFRST b0, TFRST b1, RIE b2, TIE b3, RTRG/T... retained, SSIRST
 //   b16), SSIFSR+0x14 (RDF b0, RDC[13:8], TDE b16, TDC[29:24]),
@@ -17,6 +20,7 @@ use super::Peripheral;
 // (missing r_i2s_api.h), so this is proven bare-metal like the SPI
 // slave and DTC proofs.
 pub const SSI0_BASE: u32 = 0x4004_E000;
+pub const SSI1_BASE: u32 = 0x4004_E100;
 pub const SSI0_TXI_EVENT: u32 = 62;
 pub const SSI0_RXI_EVENT: u32 = 63;
 

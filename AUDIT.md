@@ -11,7 +11,7 @@ Playwright screenshots with a clean console.
 ## Verdict
 
 No — not everything is implemented. But nothing known is broken: both
-suites are green (204 + 77, single-threaded), the demo runs three real
+suites are green (206 + 79, single-threaded), the demo runs three real
 firmware images live, and every gap below is enumerated with its
 Arduino relevance. The pattern is consistent: everything the Arduino
 core drives on real Minima sketches is modeled and proven; the missing
@@ -19,8 +19,8 @@ pieces are either unused by Arduino or parked platform work (WiFi).
 
 ## Test inventory (all green, `--test-threads=1`)
 
-- Snapshot `core/ra4m1-periph-wasm`: **204** = 128 legacy CPU decoder
-  tests + 76 R4 proofs in `src/ra4m1.rs` (boot, EK zero-boot/P106, clock stub, SCI TX,
+- Snapshot `core/ra4m1-periph-wasm`: **206** = 128 legacy CPU decoder
+  tests + 78 R4 proofs in `src/ra4m1.rs` (boot, EK zero-boot/P106, clock stub, SCI TX,
   GPT, PORT, MMIO blinky, ADC, DAC, RTC, RTC alarm, DMAC, DTC repeat
   + GPT->DAC firmware, ELC, AGT, CRC/DOC, SCI echo, OPAMP/ACMP,
   dataflash program/erase, OPAMP firmware, CTSU, CTSU mutual +
@@ -34,7 +34,7 @@ pieces are either unused by Arduino or parked platform work (WiFi).
   Serial1 echo, extra channels, RTC firmware, WDT refresh/expire,
   CAN1 + DAC8 + TSN + SLCDC + KINT + SSI + matrix proofs, RTC alarm +
   bus-off recovery firmware, Blink boots, Blink toggles).
-- Small core `core/ra4m1-core`: **77** proofs (exact one-for-one mirror
+- Small core `core/ra4m1-core`: **79** proofs (exact one-for-one mirror
   of the snapshot's R4 proofs, incl. ITE flags, USB host-flow helpers,
   HID/suspend firmware proofs, DTC repeat, CAN errors + bus-off recovery,
   RTC alarm firmware, EK-RA4M1 zero-boot; runs 3-4x faster
@@ -49,7 +49,7 @@ pieces are either unused by Arduino or parked platform work (WiFi).
 - Core parity: snapshot vs small-core models differ ONLY in env-gated
   debug logs (`ICULOG`/`EVLOG`/`DMAEVLOG` in both, gated off by default)
   plus snapshot's legacy CPU tests. R4 proofs are one-for-one identical
-  (76/76 + EK boot). No behavioral drift.
+  (78/78 + EK boot). No behavioral drift.
 - Upstream CPU reports in `Documents/stm32 F4/cpu_bug.md`: §11
   (exception live-r13, both cores fixed), §12 (predicated ADD/SUB-imm
   flags, both cores fixed). Plus the earlier MRS-PSR IPSR fix.
@@ -88,7 +88,9 @@ Bases from `R7FA4M1AB.h`. "Arduino use" = what ArduinoCore-renesas
 | ICU ext-IRQ | `0x4000_6000` | IRQCR sense + `icu_pin_edge` injection, IELSR routing | pin-IRQ + attachInterrupt proofs (all 16 lines) |
 | KINT | `0x4008_0000` | KRCTL/KRF/KRM + `kint_key_press` jig into KEY_INT event 69 | key flag + firmware proof |
 | SLCDC | `0x4008_2000` | mode regs + 64B display RAM retain (no panel) | regs + display RAM proof |
-| SSI0 | `0x4004_E000` | TX drain + RX pattern FIFO + TXI/RXI edges | flags + bare-metal firmware proof (Arduino I2S lib broken) |
+| SSI0/SSI1 | `0x4004_E000`/`0x4004_E100` | TX drain + RX pattern FIFO + TXI/RXI edges (SSI1: same type, own slot/FIFOs; FSP mask = SSI0 only) | SSI0 flags + bare-metal firmware proof (Arduino I2S lib broken), SSI1 register proof |
+| GPT OPS / POEG0-3 | `0x4007_8FF0` / `0x4004_2000`+n*`0x100` | safety-shutdown stubs (accept-and-retain, outputs never gated; no Arduino consumer) | register proof |
+| R_DMA controller | `0x4000_5200` | module-activation stub (DMAST/DMECHR retain; engine stays in DMAC/DTC) | register proof |
 | CAN1 | `0x4005_1000` | same mailboxes as CAN0, eventless (polled SENTDATA/NEWDATA) | self-test loopback + bare-metal firmware proof |
 | DAC8 | `0x4009_E000` | DACS retain + DAM enable gate | retain + bare-metal firmware proof |
 | TSN cal | `0x407E_C228` | fixed factory-trim constants (synthetic) | calibration read proof |

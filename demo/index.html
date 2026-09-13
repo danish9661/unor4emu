@@ -20,7 +20,7 @@
   <div class="badges">
     <span class="badge">R7FA4M1AB3CFM</span>
     <span class="badge">Cortex-M4F @ 48MHz</span>
-    <span class="badge ok">204 proofs green</span>
+    <span class="badge ok">206 proofs green</span>
     <span class="badge" id="wasm-size">228 KB wasm</span>
   </div>
 </header>
@@ -292,7 +292,7 @@
     </div>
 
     <div class="tabpane" id="pane-docs">
-      <p class="desc">What this emulator covers: every row is a feature of the Arduino UNO R4 Minima variant (RA4M1), whether the silicon has it, what the emulator does with it, and how it is proven. Full proofs live in the repo (<span class="mono">cargo test</span>, 204 + 77 green).</p>
+      <p class="desc">What this emulator covers: every row is a feature of the Arduino UNO R4 Minima variant (RA4M1), whether the silicon has it, what the emulator does with it, and how it is proven. Full proofs live in the repo (<span class="mono">cargo test</span>, 206 + 79 green).</p>
       <div class="doctable-wrap"><table class="doctable">
         <thead><tr><th>Feature</th><th>Minima HW</th><th>Status</th><th>Proof / note</th></tr></thead>
         <tbody>
@@ -329,6 +329,8 @@
         <tr><td>SLCDC segment LCD</td><td>yes (no panel)</td><td class="st-done">Done</td><td>regs + 64B display RAM proof</td></tr>
         <tr><td>KINT key interrupt</td><td>yes</td><td class="st-done">Done</td><td>key-press jig into event 69 + proof</td></tr>
         <tr><td>SSI0 audio FIFO</td><td>yes (I2S lib broken)</td><td class="st-done">Done</td><td>TX drain + RX pattern proof</td></tr>
+        <tr><td>SSI1 audio FIFO</td><td>yes (FSP mask = SSI0 only)</td><td class="st-done">Done</td><td>same model, own slot/FIFOs; register proof</td></tr>
+        <tr><td>GPT OPS / POEG0-3 / R_DMA</td><td>stubs (no Arduino consumer)</td><td class="st-done">Done</td><td>accept-and-retain; register proof</td></tr>
         <tr><td>LED matrix 12x8</td><td>GPIO-driven</td><td class="st-done">Done</td><td>charlieplex render; smiley proof + Matrix tab</td></tr>
         <tr><td>Dataflash 8KB + FACI</td><td>yes</td><td class="st-done">Done</td><td>program/erase/blankcheck; EEPROM tab</td></tr>
         <tr><td>Arduino EEPROM lib</td><td>via dataflash</td><td class="st-done">Done</td><td>round-trip proof; EEPROM tab</td></tr>
@@ -351,7 +353,7 @@
 </main>
 
 <footer>
-  <span>RA4M1 peripheral models proven against arduino-cli firmware (204 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (206 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
 </footer>
 
 <script type="module" src="app.js"></script>
