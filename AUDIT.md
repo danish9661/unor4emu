@@ -11,7 +11,7 @@ Playwright screenshots with a clean console.
 ## Verdict
 
 No — not everything is implemented. But nothing known is broken: both
-suites are green (198 + 70, single-threaded), the demo runs three real
+suites are green (201 + 73, single-threaded), the demo runs three real
 firmware images live, and every gap below is enumerated with its
 Arduino relevance. The pattern is consistent: everything the Arduino
 core drives on real Minima sketches is modeled and proven; the missing
@@ -19,32 +19,35 @@ pieces are either unused by Arduino or parked platform work (WiFi).
 
 ## Test inventory (all green, `--test-threads=1`)
 
-- Snapshot `core/ra4m1-periph-wasm`: **198** = 128 legacy CPU decoder
-  tests + 70 R4 proofs in `src/ra4m1.rs` (boot, clock stub, SCI TX,
+- Snapshot `core/ra4m1-periph-wasm`: **201** = 128 legacy CPU decoder
+  tests + 73 R4 proofs in `src/ra4m1.rs` (boot, clock stub, SCI TX,
   GPT, PORT, MMIO blinky, ADC, DAC, RTC, RTC alarm, DMAC, DTC repeat
   + GPT->DAC firmware, ELC, AGT, CRC/DOC, SCI echo, OPAMP/ACMP,
   dataflash program/erase, OPAMP firmware, CTSU, CTSU mutual +
   firmware, CAN loopback, CAN errors + isError firmware, I2C EEPROM,
   I2C slave, SPI slave + firmware, Wire slave firmware, CAN FIFO +
-  firmware, SD card + firmware, PWM + firmware, SCI-SPI loopback, SPI loopback, USB
+  firmware, SD card + firmware, PWM + firmware, analogWrite + tone +
+  SoftwareSerial firmware, SCI-SPI loopback, SPI loopback, USB
   TX capture, CDC enumerate, Serial hello, USB suspend/resume, HID
   keyboard, USB suspend/resume firmware, CDC echo, Wire ok, SPI ok,
   CAN ok, ITE flags, ICU pin-IRQ, EEPROM firmware, attachInterrupt,
   Serial1 echo, extra channels, RTC firmware, WDT refresh/expire,
   CAN1 + DAC8 + TSN + SLCDC + KINT + SSI + matrix proofs,
   Blink boots, Blink toggles).
-- Small core `core/ra4m1-core`: **70** proofs (exact one-for-one mirror
+- Small core `core/ra4m1-core`: **73** proofs (exact one-for-one mirror
   of the snapshot's R4 proofs, incl. ITE flags, USB host-flow helpers,
   HID/suspend firmware proofs, DTC repeat, CAN errors; runs 3-4x faster
   than the snapshot suite).
 - WASM: 228KB release (`uno_r4_minima_wasm_bg.wasm`), no STM32/ESP32.
 - Demo `demo/`: Blink LED + GPIO grid, Serial enumerate + hello,
   Echo round-trip, Wire master/slave trace, SPI master/slave trace,
-  SD init + MBR dump, CAN FIFO trace, EEPROM byte trace, PWM duty — all
+  SD init + MBR dump, CAN FIFO trace, EEPROM byte trace, PWM duty,
+  analogWrite regs, tone toggle, SoftSerial 0xA5 loopback — all
   screenshot-verified, console clean. Deploys to Pages via workflow.
 - Core parity: snapshot vs small-core models differ ONLY in env-gated
-  debug logs (`ICULOG`/`SELLOG`/`EXCLOG` in snapshot) plus snapshot's
-  legacy CPU tests. R4 proofs are one-for-one identical (70/70). No behavioral drift.
+  debug logs (`ICULOG`/`EVLOG`/`DMAEVLOG` in both, gated off by default)
+  plus snapshot's legacy CPU tests. R4 proofs are one-for-one identical
+  (73/73). No behavioral drift.
 - Upstream CPU reports in `Documents/stm32 F4/cpu_bug.md`: §11
   (exception live-r13, both cores fixed), §12 (predicated ADD/SUB-imm
   flags, both cores fixed). Plus the earlier MRS-PSR IPSR fix.
@@ -58,18 +61,18 @@ Bases from `R7FA4M1AB.h`. "Arduino use" = what ArduinoCore-renesas
 
 | Block | Base | Model | Proof |
 |---|---|---|---|
-| PORT0-14 | `0x4004_0000`+n*`0x20` | `ra_port.rs` real PCNTR layout, input-inject hook | port retained, blink toggles, demo grid |
+| PORT0-14 | `0x4004_0000`+n*`0x20` | `ra_port.rs` real PCNTR layout, PFS-synced PODR/PDR, soft_wire TX->RX jig + input-inject hook | port retained, blink toggles, softserial loopback, demo grid |
 | PFS | `0x4004_0800` | retain map (separate instance, explicit flag - slot offsets never reach 0x800) | via PORT proofs + PWM routing |
 | SYSC/MSTP | `0x4001_E000`/`0x4004_6FFC` | accept-and-retain stubs | boot proofs |
 | ICU | `0x4000_6000` | IELSR routing mirror | ELC/USB/CAN/CTSU IRQ proofs |
 | ELC | `0x4004_1000` | link table + soft trigger (GPT/ADC dispatch) | elc routes event |
 | SCI0-9 | `0x4007_0000`+ch*`0x20` | `ra_sci.rs` UART byte-exact + simple-SPI mode (ch4-9 eventless polled) | TX console, echo path, SPI loopback, Serial1 proof (SCI2) |
-| GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` real offsets (GTCR+0x2C GTIOR+0x34 GTCNT+0x48 GTCCR+0x4C GTPR+0x64), wrap/compare/overflow events, GTIOA/B function-0 PWM latches routed to PORT via PFS pinmux table | counts + matches, PWM + firmware (25% duty on D6) |
+| GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` real offsets (GTCR+0x2C GTIOR+0x34 GTCNT+0x48 GTCCR+0x4C GTPR+0x64), wrap/compare/overflow events, exact-time multi-wrap walk with due-stamped DMAC units, GTIOA/B function-0 PWM latches routed to PORT via PFS pinmux table, GTBER C/D->A/B buffering | counts + matches, PWM + firmware (25% duty on D6), analogWrite/tone/SoftSerial firmware |
 | AGT0-5 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` down-counter, latched reload, TUNDF (ch2-5 eventless) | counts, millis IRQs |
 | ADC0/1 | `0x4005_C000`/`0x4005_C200` | `ra_analog.rs` ADST=bit15, overrides | converts channel |
 | DAC12 | `0x4005_E000` | retained output | dac retained |
 | RTC | `0x4004_4000` | time (BCD) + alarm IRQ (event 38) | ticks, alarm event, RTC lib firmware proof (minute rollover) |
-| DMAC0-7/DTC | `0x4000_5000`/`0x4000_5400` | memcopy path (ch4-7 eventless) + DTC repeat engine (IELSR.DTCE, SRAM vector table, serviced in mem path) | mem-to-mem, DTC repeat + GPT->DAC firmware proof |
+| DMAC0-7/DTC | `0x4000_5000`/`0x4000_5400` | memcopy path (ch4-7 eventless) + event-driven per-unit engine (DMSAR/DMDAR/DMCRA/DMTMD SZ/DMAMD/DMINT/DMCNT/DTE, DELSR links, due-bucketed FIFO, outstanding-tracked completion) + DTC repeat engine (IELSR.DTCE, SRAM vector table, serviced in mem path) | mem-to-mem, SoftSerial PCNTR sampling firmware, DTC repeat + GPT->DAC firmware proof |
 | WDT/IWDT | `0x4004_4200`/`0x4004_4400` | countdown + reset flags, TOPS period | WDT lib refresh + expiry proofs |
 | CRC/DOC | `0x4007_4000`/`0x4005_4100` | IEEE-802.3 / compare | crc_and_doc |
 | OPAMP/ACMP | `0x4008_6000`/`0x4008_5E00` | follower loopback + compare | opamp proof + OPAMP lib firmware proof (AMPMON0) |
@@ -139,5 +142,5 @@ Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
 
 ## What's next (priority order)
 
-1. **Platform**: WiFi un-park (waiting on S3 code). Demo ships Blink/Serial/Echo/Wire/SPI/SD/CAN/EEPROM/PWM/RTC/CTSU/HID/Matrix/Docs tabs + MIPS meter + a Pages deploy workflow.
+1. **Platform**: WiFi un-park (waiting on S3 code). Demo ships Blink/Serial/Echo/Wire/SPI/SD/CAN/EEPROM/PWM/analogWrite/tone/SoftSerial/RTC/CTSU/HID/Matrix/Docs tabs + MIPS meter + a Pages deploy workflow.
 2. **New models**: nothing with a buildable Arduino consumer remains (MSC lacks consumers and its core header hardcodes it off; FAT needs 32KB; SDHI has no on-chip peripheral — all closed with reasons above).

@@ -105,7 +105,6 @@ impl Peripheral for RaSpi {
     }
     fn write_sized(&mut self, sys: &System, offset: u32, value: u32, byte_offset: u8, size: u8) {
         let base = (offset & !3) as usize;
-        let base = (offset & !3) as usize;
         for i in 0..size as usize {
             if byte_offset as usize + i >= 4 { continue; }
             let idx = base + byte_offset as usize + i;
