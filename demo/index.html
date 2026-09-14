@@ -31,8 +31,8 @@
   <div class="badges">
     <span class="badge">R7FA4M1AB3CFM</span>
     <span class="badge">Cortex-M4F @ 48MHz</span>
-    <span class="badge ok">197 proofs green</span>
-    <span class="badge" id="wasm-size">228 KB wasm</span>
+    <span class="badge ok">199 proofs green</span>
+    <span class="badge" id="wasm-size">288 KB wasm</span>
   </div>
 </header>
 
@@ -112,6 +112,7 @@
       <button class="tab" data-tab="hid" role="tab">HID</button>
       <button class="tab" data-tab="wdt" role="tab">WDT</button>
       <button class="tab" data-tab="signal" role="tab">Signal</button>
+      <button class="tab" data-tab="engine" role="tab">Engine</button>
       <button class="tab" data-tab="matrix" role="tab">Matrix</button>
       <button class="tab" data-tab="ek" role="tab">EK-RA4M1</button>
       <button class="tab" data-tab="docs" role="tab">Docs</button>
@@ -320,6 +321,15 @@
       <div id="signal-verdict" class="term small"></div>
     </div>
 
+    <div class="tabpane" id="pane-engine">
+      <p class="desc">Engine room: six proofs that never need the Serial monitor. Each boots its real firmware and reads the verdict off the virtual wire or pins — CAN loopback, CAN errors, DTC-driven DAC samples, Wire EEPROM, SPI loopback, and USB suspend/resume callbacks.</p>
+      <div class="row">
+        <button id="btn-engine-run" class="btn-acc">Run engine proofs</button>
+      </div>
+      <ol id="engine-steps" class="enum"></ol>
+      <div id="engine-verdict" class="term small"></div>
+    </div>
+
     <div class="tabpane" id="pane-matrix">
       <p class="desc">12&times;8 LED matrix, charlieplexed on real GPIO (the same 11 pins as hardware): the sketch multiplexes a smiley faster than the eye. The grid below accumulates lit LEDs with persistence — like vision does. No panel on Minima; the pattern is the verdict.</p>
       <div class="row">
@@ -358,7 +368,7 @@
 </main>
 
 <footer>
-  <span>RA4M1 peripheral models proven against arduino-cli firmware (117 + 80 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (118 + 81 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
 </footer>
 
 <script type="module" src="app.js"></script>

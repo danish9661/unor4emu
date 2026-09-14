@@ -3289,6 +3289,184 @@ mod tests {
     }
 
     #[test]
+    fn ra4m1_map_usb_msc_mock() {
+        // USB MSC mock chip: Bulk-Only Transport + SCSI over the bulk
+        // pipes, backed by a virtual 16x512B disk (same jig pattern as
+        // the SD card). CFG_TUD_MSC=0 so no Arduino firmware can drive
+        // MSC; instead this scripted proof drives the *model* the way
+        // TinyUSB's dcd would: CBW in on bulk-OUT, data/CSW out on
+        // bulk-IN, through real PIPECFG + FIFOSEL + BVAL + BRDY/BEMP +
+        // IRQ. Proves the USBFS bulk path can carry BOT framing
+        // (INQUIRY/READ_CAPACITY/READ10/WRITE10) so a future MSC stack
+        // has transport to run on.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // Enable BRDY+BEMP interrupts, map USBFS_INT (51) to IRQ10.
+        sys.p.write(sys, USBFS_BASE + 0x30, 2, (1 << 8) | (1 << 10));
+        sys.p.write(sys, 0x4000_6300 + 10 * 4, 4, 51);
+        sys.p.write(sys, 0xE000_E100, 4, 1 << 10);
+        const OUT_PIPE: u32 = 1;
+        const IN_PIPE: u32 = 2;
+        // Bulk OUT EPNUM 2 + bulk IN EPNUM 2 DIR, MPS 64.
+        sys.p.write(sys, USBFS_BASE + 0x64, 2, OUT_PIPE);
+        sys.p.write(sys, USBFS_BASE + 0x68, 2, (1 << 14) | 2);
+        sys.p.write(sys, USBFS_BASE + 0x6C, 2, 64);
+        sys.p.write(sys, USBFS_BASE + 0x64, 2, IN_PIPE);
+        sys.p.write(sys, USBFS_BASE + 0x68, 2, (1 << 14) | (1 << 4) | 2);
+        sys.p.write(sys, USBFS_BASE + 0x6C, 2, 64);
+        // Windowed PIPECFG reads back what was programmed.
+        sys.p.write(sys, USBFS_BASE + 0x64, 2, OUT_PIPE);
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x68, 2) & 0xFFFF, (1 << 14) | 2);
+        sys.p.write(sys, USBFS_BASE + 0x64, 2, IN_PIPE);
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x68, 2) & 0xFFFF, (1 << 14) | (1 << 4) | 2);
+        // Mock disk: deterministic pattern + MBR signature (SD jig shape).
+        const BLOCKS: usize = 16;
+        let mut disk = vec![0u8; BLOCKS * 512];
+        for b in 0..BLOCKS {
+            for i in 0..512 {
+                disk[b * 512 + i] = ((b * 512 + i).wrapping_mul(7).wrapping_add(3)) as u8;
+            }
+        }
+        disk[510] = 0x55;
+        disk[511] = 0xAA;
+        // Firmware side, scripted MMIO: 8-bit D0FIFO select/read/write.
+        let sel_pipe = |sys: &crate::system::WasmSystem, pipe: u32| {
+            sys.p.write(sys, USBFS_BASE + 0x28, 2, pipe);
+        };
+        let dev_read_out = |sys: &crate::system::WasmSystem, n: usize| -> Vec<u8> {
+            sel_pipe(sys, OUT_PIPE);
+            (0..n).map(|_| (sys.p.read(sys, USBFS_BASE + 0x18, 1) & 0xFF) as u8).collect()
+        };
+        let dev_write_in = |sys: &crate::system::WasmSystem, data: &[u8]| {
+            sel_pipe(sys, IN_PIPE);
+            for &b in data {
+                sys.p.write(sys, USBFS_BASE + 0x18, 1, b as u32);
+            }
+            sys.p.write(sys, USBFS_BASE + 0x2A, 2, 1 << 15); // BVAL
+        };
+        // CBW frame (31B, 'USBC').
+        let mk_cbw = |tag: u32, xfer: u32, inp: bool, cdb: &[u8]| -> Vec<u8> {
+            let mut v = Vec::with_capacity(31);
+            v.extend_from_slice(&0x43425355u32.to_le_bytes());
+            v.extend_from_slice(&tag.to_le_bytes());
+            v.extend_from_slice(&xfer.to_le_bytes());
+            v.push(if inp { 0x80 } else { 0x00 });
+            v.push(0); // LUN
+            v.push(cdb.len() as u8);
+            let mut c = [0u8; 16];
+            c[..cdb.len()].copy_from_slice(cdb);
+            v.extend_from_slice(&c);
+            v
+        };
+        // One CBW in: host injects, DTLN shows the live 31B, firmware
+        // drains it back byte-exact.
+        let run_cbw = |sys: &crate::system::WasmSystem, tag: u32, xfer: u32, inp: bool, cdb: &[u8]| -> Vec<u8> {
+            let cbw = mk_cbw(tag, xfer, inp, cdb);
+            with_usb(sys, |u| u.rx_inject(sys, OUT_PIPE as usize, &cbw));
+            sel_pipe(sys, OUT_PIPE);
+            assert_eq!((sys.p.read(sys, USBFS_BASE + 0x28, 4) >> 16) & 0xFFF, 31, "CBW DTLN");
+            let got = dev_read_out(sys, 31);
+            assert_eq!(&got[..], &cbw[..], "CBW loopback");
+            assert_eq!((sys.p.read(sys, USBFS_BASE + 0x28, 4) >> 16) & 0xFFF, 0, "CBW drained");
+            got
+        };
+        // CSW out (13B, 'USBS'): tag echo + residue + status.
+        let send_csw = |sys: &crate::system::WasmSystem, tag: u32, residue: u32, status: u8| {
+            let mut csw = Vec::with_capacity(13);
+            csw.extend_from_slice(&0x53425355u32.to_le_bytes());
+            csw.extend_from_slice(&tag.to_le_bytes());
+            csw.extend_from_slice(&residue.to_le_bytes());
+            csw.push(status);
+            dev_write_in(sys, &csw);
+        };
+        let take_csw = |sys: &crate::system::WasmSystem, tag: u32, status: u8| {
+            let got = usb_take_tx(sys);
+            assert_eq!(got.len(), 13, "CSW len");
+            assert_eq!(&got[0..4], &0x53425355u32.to_le_bytes(), "CSW sig");
+            assert_eq!(&got[4..8], &tag.to_le_bytes(), "CSW tag");
+            assert_eq!(got[12], status, "CSW status");
+        };
+        // --- INQUIRY (tag 1): 36B IN ---
+        let tag = 1u32;
+        let cbw = run_cbw(sys, tag, 36, true, &[0x12, 0, 0, 0, 36, 0]);
+        assert_eq!(u32::from_le_bytes(cbw[0..4].try_into().unwrap()), 0x43425355);
+        assert_eq!(u32::from_le_bytes(cbw[4..8].try_into().unwrap()), tag);
+        let mut inquiry = vec![0x00, 0x80, 0x02, 0x02, 31, 0x00, 0x00, 0x00];
+        inquiry.extend_from_slice(b"RENESAS ");
+        inquiry.extend_from_slice(b"RA4M1 MSC       ");
+        inquiry.extend_from_slice(b"1.00");
+        assert_eq!(inquiry.len(), 36);
+        dev_write_in(sys, &inquiry);
+        let data = usb_take_tx(sys);
+        assert_eq!(data, inquiry);
+        assert_eq!(&data[8..16], b"RENESAS ");
+        send_csw(sys, tag, 0, 0);
+        take_csw(sys, tag, 0);
+        // --- READ_CAPACITY10 (tag 2): 8B IN, last LBA + 512 ---
+        let tag = 2u32;
+        run_cbw(sys, tag, 8, true, &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let cap = [(BLOCKS - 1) as u32, 512u32].iter()
+            .flat_map(|w| w.to_be_bytes()).collect::<Vec<u8>>();
+        dev_write_in(sys, &cap);
+        let data = usb_take_tx(sys);
+        assert_eq!(data, cap);
+        assert_eq!(u32::from_be_bytes(data[0..4].try_into().unwrap()), (BLOCKS - 1) as u32);
+        assert_eq!(u32::from_be_bytes(data[4..8].try_into().unwrap()), 512);
+        send_csw(sys, tag, 0, 0);
+        take_csw(sys, tag, 0);
+        // --- READ10 LBA0 len1 (tag 3): 512B IN, MBR signature ---
+        let tag = 3u32;
+        run_cbw(sys, tag, 512, true, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+        dev_write_in(sys, &disk[0..512]);
+        let data = usb_take_tx(sys);
+        assert_eq!(data.len(), 512);
+        assert_eq!(&data[510..512], &[0x55, 0xAA], "MBR signature");
+        send_csw(sys, tag, 0, 0);
+        take_csw(sys, tag, 0);
+        // --- WRITE10 LBA1 len1 (tag 4): 512B OUT, then read back ---
+        let tag = 4u32;
+        run_cbw(sys, tag, 512, false, &[0x2A, 0, 0, 0, 0, 1, 0, 0, 1, 0]);
+        let pat: Vec<u8> = (0..512).map(|i| ((i * 11 + 5) & 0xFF) as u8).collect();
+        with_usb(sys, |u| u.rx_inject(sys, OUT_PIPE as usize, &pat));
+        let got = dev_read_out(sys, 512);
+        assert_eq!(got, pat);
+        disk[512..1024].copy_from_slice(&got);
+        send_csw(sys, tag, 0, 0);
+        take_csw(sys, tag, 0);
+        let tag = 5u32;
+        run_cbw(sys, tag, 512, true, &[0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0]);
+        dev_write_in(sys, &disk[512..1024].to_vec());
+        let data = usb_take_tx(sys);
+        assert_eq!(data, pat, "write/read-back");
+        send_csw(sys, tag, 0, 0);
+        take_csw(sys, tag, 0);
+        // --- REQUEST_SENSE (tag 6): 18B IN, fixed sense ---
+        let tag = 6u32;
+        run_cbw(sys, tag, 18, true, &[0x03, 0, 0, 0, 18, 0]);
+        let sense = [0x70u8, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        dev_write_in(sys, &sense);
+        let data = usb_take_tx(sys);
+        assert_eq!(&data[..], &sense[..]);
+        send_csw(sys, tag, 0, 0);
+        take_csw(sys, tag, 0);
+        // --- TEST_UNIT_READY (tag 7): no data phase, direct pass ---
+        let tag = 7u32;
+        run_cbw(sys, tag, 0, false, &[0x00, 0, 0, 0, 0, 0]);
+        send_csw(sys, tag, 0, 0);
+        take_csw(sys, tag, 0);
+        // --- Unknown opcode (tag 8): CSW fail, like silicon STALL ---
+        let tag = 8u32;
+        run_cbw(sys, tag, 0, false, &[0xFF, 0, 0, 0, 0, 0]);
+        send_csw(sys, tag, 0, 1);
+        take_csw(sys, tag, 1);
+        // Bulk path latched + IRQed like silicon.
+        assert_ne!((sys.p.read(sys, USBFS_BASE + 0x48, 4) >> 16) & (1 << IN_PIPE), 0, "BEMP");
+        assert!(sys.p.nvic.borrow().has_pending(), "USB IRQ");
+    }
+
+    #[test]
     fn ra4m1_arduino_blink_boots() {
         // Real ArduinoCore-renesas Blink.ino built with arduino-cli
         // (fqbn arduino:renesas_uno:minima), vendored at core/blinky/r4blink.bin.

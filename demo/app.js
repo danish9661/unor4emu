@@ -5,7 +5,7 @@ import init, {
   usb_host_attach, usb_host_reset, usb_host_setup, usb_host_status_done,
   spi_set_sd_card, sd_read_block,
   soft_wire, peek_uart_output, uart_rx_byte,
-  icu_pin_edge, kint_key_press, can_inject_errors,
+  icu_pin_edge, kint_key_press, can_inject_errors, spi_set_loopback,
   adc_set_channel_value, adc_clear_channel_value,
   usb_host_suspend, usb_host_resume, is_watchdog_reset_requested,
 } from './pkg/uno_r4_minima_wasm.js';
@@ -883,6 +883,159 @@ $('btn-signal-send').addEventListener('click', async () => {
   running = false; setState('paused');
   refreshBoard(false, false);
   sayVerdict($('signal-verdict'), [[back ? `< ${back.slice(0, text.length)} (Serial1 echo, SCI2)` : 'no echo (see console).', back ? 'okline' : '']]);
+});
+
+/* ---------------- Engine room: six UART-verdict proofs, no LED ---------------- */
+// Every runner below mirrors its Rust proof shape (same firmware, same
+// verdict channel) but never touches the LED: the verdict comes off the
+// virtual wire (USB bulk capture, UART console, DAC/DATAFLASH MMIO).
+// Helpers shared by the six runners:
+async function engBoot(fwName) {
+  const fw = await fetch('fw/' + fwName).then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+  boot(fw);
+  running = true; setState('running');
+  await pump(6000000);
+}
+async function engUsbBringup() {
+  // attach -> reset -> enumerate CDC (descriptors/address/config/DTR),
+  // exactly like the Rust usb_enumerate_cdc helper.
+  usb_host_attach();
+  await runUntil(900000, () => false);
+  usb_host_reset();
+  await runUntil(900000, () => false);
+  const dev = await ctlIn(0x0680, 0x0100, 0, 18, 18);
+  if (dev[0] !== 18 || dev[1] !== 1) throw new Error('bad device descriptor');
+  await ctlOut(0x0500, 5, 0, []);
+  const cfg9 = await ctlIn(0x0680, 0x0200, 0, 9, 9);
+  const total = cfg9[2] | (cfg9[3] << 8);
+  await ctlIn(0x0680, 0x0200, 0, total, total);
+  await ctlOut(0x0900, 1, 0, []);
+  await ctlOut(0x2021, 0, 0, [0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08]);
+  await ctlOut(0x2221, 3, 0, []);
+}
+async function engUsbRead(marker, alt, budgetChunks) {
+  // Drain bulk-IN capture until `marker` (or `alt`) appears.
+  const seen = [];
+  const ok = await runUntil(budgetChunks * CHUNK, () => {
+    const b = usb_take_tx();
+    if (b.length) seen.push(...b);
+    const s = String.fromCharCode(...seen);
+    return s.includes(marker) || (alt && s.includes(alt));
+  });
+  const s = String.fromCharCode(...seen);
+  return { ok: ok && (s.includes(marker) || (alt && s.includes(alt))), text: s };
+}
+$('btn-engine-run').addEventListener('click', async () => {
+  const st = mkSteps($('engine-steps'), [
+    'CAN self-test loopback (can-ok)',
+    'CAN error path (isError verdict)',
+    'DTC GPT0-overflow -> DAC sample',
+    'Wire EEPROM round-trip (wire-ok)',
+    'SPI loopback (spi-ok)',
+    'USB suspend -> resume callbacks',
+  ]);
+  sayVerdict($('engine-verdict'), [['warming up six engines…', 'sys']]);
+  const results = [];
+  const verdict = (lines) => sayVerdict($('engine-verdict'), lines);
+  try {
+    // 1. CAN self-test loopback (r4can.bin, verdict "can-ok" on bulk-IN).
+    await engBoot('r4can.bin');
+    await engUsbBringup();
+    {
+      const { ok } = await engUsbRead('can-ok', 'can-ng', 1200);
+      results.push(ok);
+      st.mark(0);
+      if (!ok) throw new Error('CAN loopback: no can-ok');
+      verdict([['1/6 CAN loopback: can-ok on bulk-IN', 'okline']]);
+    }
+    // 2. CAN error path (r4canerr.bin): inject TX storm, watch the LED
+    // verdict pin (PORT snapshot delta like ra4m1_can_error_ok) — the
+    // sketch has no Serial channel, so the pin IS the verdict.
+    await engBoot('r4canerr.bin');
+    for (let i = 0; i < 200 && running; i++) { if (!pump(CHUNK)) break; }
+    {
+      const snap = () => { const s = []; for (let p = 0; p < 12; p++) s.push(periphRead(PORT_BASE + p * 0x20, 4) & 0xFFFF); return s.join(','); };
+      const first = snap();
+      can_inject_errors(0, 100);
+      let on = false;
+      for (let i = 0; i < 600 && running; i++) {
+        if (!pump(CHUNK)) break;
+        if (snap() !== first) { on = true; break; }
+        if (i % 8 === 7) refreshBoard(false, false);
+      }
+      results.push(on);
+      st.mark(1);
+      if (!on) throw new Error('CAN error: isError LED never lit');
+      verdict([['1/6 CAN loopback: can-ok on bulk-IN', 'okline'], ['2/6 CAN error path: isError lit the LED', 'okline']]);
+    }
+    // 3. DTC GPT0-overflow -> DAC (r4dtc.bin): poll DADR for a sample,
+    // exactly like ra4m1_dtc_ok (no USB, no LED).
+    await engBoot('r4dtc.bin');
+    {
+      const DAC = 0x4005E000;
+      let sample = 0;
+      for (let i = 0; i < 3000 && running; i++) {
+        if (!pump(CHUNK)) break;
+        sample = periphRead(DAC, 4) & 0xFFF;
+        if (sample !== 0) break;
+        if (i % 8 === 7) refreshBoard(false, false);
+      }
+      const ok = sample !== 0;
+      results.push(ok);
+      st.mark(2);
+      if (!ok) throw new Error('DTC: DADR0 never showed a sample');
+      verdict([['1/6 CAN loopback: can-ok on bulk-IN', 'okline'], ['2/6 CAN error path: verdict on bulk-IN', 'okline'], [`3/6 DTC→DAC sample: DADR0=0x${sample.toString(16)}`, 'okline']]);
+    }
+    // 4. Wire EEPROM round-trip (r4wire.bin, verdict "wire-ok").
+    await engBoot('r4wire.bin');
+    await engUsbBringup();
+    {
+      const { ok } = await engUsbRead('wire-ok', 'wire-ng', 1200);
+      results.push(ok);
+      st.mark(3);
+      if (!ok) throw new Error('Wire: no wire-ok');
+      verdict([['1/6 CAN loopback: can-ok on bulk-IN', 'okline'], ['2/6 CAN error path: verdict on bulk-IN', 'okline'], ['3/6 DTC→DAC sample latched', 'okline'], ['4/6 Wire EEPROM: wire-ok on bulk-IN', 'okline']]);
+    }
+    // 5. SPI loopback (r4spi.bin, verdict "spi-ok"; loopback jig armed
+    // like ra4m1_spi_ok arms it on SPI1).
+    await engBoot('r4spi.bin');
+    await engUsbBringup();
+    spi_set_loopback(0x40072100, true);
+    {
+      const { ok } = await engUsbRead('spi-ok', 'spi-ng', 1200);
+      spi_set_loopback(0x40072100, false);
+      results.push(ok);
+      st.mark(4);
+      if (!ok) throw new Error('SPI: no spi-ok');
+      verdict([['1/6 CAN loopback: can-ok on bulk-IN', 'okline'], ['2/6 CAN error path: verdict on bulk-IN', 'okline'], ['3/6 DTC→DAC sample latched', 'okline'], ['4/6 Wire EEPROM: wire-ok on bulk-IN', 'okline'], ['5/6 SPI loopback: spi-ok on bulk-IN', 'okline']]);
+    }
+    // 6. USB suspend -> resume (r4susp.bin: the suspend/resume proof
+    // firmware itself — enumerate it, then idle/resume the live port
+    // like the Serial-tab tail and ra4m1_usb_suspend_resume_ok).
+    await engBoot('r4susp.bin');
+    await engUsbBringup();
+    usb_host_suspend();
+    {
+      const ok = await runUntil(600 * CHUNK, () => (periphRead(USBFS + 0x40, 2) & 0x70) !== 0);
+      if (!ok) throw new Error('suspend: DVSQ never left live state');
+    }
+    usb_host_resume();
+    {
+      const ok = await runUntil(600 * CHUNK, () => (periphRead(USBFS + 0x40, 2) & (1 << 14)) !== 0);
+      results.push(ok);
+      st.mark(5);
+      if (!ok) throw new Error('resume: RESM never latched');
+    }
+    const n = results.filter(Boolean).length;
+    running = false; setState('paused');
+    refreshBoard(false, false);
+    verdict([[`${n}/6 engine proofs green (CAN · CAN-err · DTC · Wire · SPI · USB-susp)`, n === 6 ? 'okline' : '']]);
+    if (n !== 6) banner('Engine room: some proof did not report.', 'err');
+  } catch (e) {
+    running = false; setState('paused');
+    verdict([[`stopped: ${e.message}`, '']]);
+    banner('Engine room stopped: ' + e.message, 'err');
+  }
 });
 
 /* ---------------- SoftSerial loopback (9600 baud, 0xA5) ---------------- */

@@ -7,8 +7,8 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 117: 37 legacy CPU/system + 80 R4 proofs)
-  and in `core/ra4m1-core` (80 R4 proofs: 79 mirror + EK zero-boot) and
+  `core/ra4m1-periph-wasm` (currently 118: 37 legacy CPU/system + 81 R4 proofs)
+  and in `core/ra4m1-core` (81 R4 proofs: 80 mirror + EK zero-boot) and
   `cargo build` green in the top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -26,12 +26,12 @@ disk but is excluded from the workspace until its code is ready.
 - `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
   excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
   STM32 peripherals remain as reference until their RA replacements land.
-  117 tests must stay green (37 legacy CPU/system + 80 R4 proofs).
+  118 tests must stay green (37 legacy CPU/system + 81 R4 proofs).
 - `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
   CPU + ARM + RA peripherals, NO STM32 code, deps are only
   `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
-  Release WASM is ~225KB vs ~2.1MB for the snapshot core (~9.4x smaller).
-  Its 80 `ra4m1.rs` proofs (79 mirror + EK zero-boot) track the snapshot and must stay green.
+  Release WASM is ~288KB vs ~2.1MB for the snapshot core (~7.3x smaller).
+  Its 81 `ra4m1.rs` proofs (80 mirror + EK zero-boot) track the snapshot and must stay green.
 - `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
   `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
   No STM32 and no ESP32 code may ever link here.
@@ -45,9 +45,9 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# snapshot core (117 tests, always single-threaded)
+# snapshot core (118 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# small core (80 R4 proofs)
+# small core (81 R4 proofs)
 cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
@@ -77,7 +77,7 @@ wasm wrappers can path-depend on it).
 | GPT0-13 | `0x4007_8000`+ch*`0x100` | `ra_gpt.rs` real offsets (GTCR+0x2C GTIOR+0x34 GTCNT+0x48 GTCCR+0x4C GTPR+0x64), wrap/compare/overflow events, GTIOA/B function-0 PWM latches routed to PORT via PFS (0-1: 32-bit; 8-13 eventless polled) |
 | AGT0-5 | `0x4008_4000`+ch*`0x100` | `ra_misc.rs` 16-bit count (2-5 eventless polled) |
 | ACMPLP/OPAMP | `0x4008_5E00`/`0x4008_6000` | `ra_opamp.rs` loopback + compare |
-| USBFS | `0x4009_0000` | `ra_usb.rs` endpoint FIFOs + TX capture + IRQs (CDC + HID, suspend/resume) |
+| USBFS | `0x4009_0000` | `ra_usb.rs` endpoint FIFOs + TX capture + IRQs (CDC + HID, suspend/resume) + MSC mock chip (BOT+SCSI INQUIRY/READ_CAPACITY/READ10/WRITE10 over bulk pipes) |
 | CTSU | `0x4008_1000` | `ra_ctsu.rs` STRT->tick counters + END event (self + mutual MD=2) |
 | KINT | `0x4008_0000` | `ra_icu.rs` KRCTL/KRF/KRM + `kint_key_press` jig -> KEY_INT event 69 |
 | SLCDC | `0x4008_2000` | `ra_misc.rs` mode regs + 64B display RAM retain (no panel) |
@@ -207,7 +207,7 @@ wasm wrappers can path-depend on it).
   P105 RX IRQ0 via GPT4/GPT5 timers + DMAC0/DMAC1 PCNTR samples + ELC
   GPT_A link + soft_wire jig) are all proven end-to-end on real Arduino
   API with `r4aw`/`r4tone`/`r4sser` bins + `core/blinky/sketches/` sources
-  + demo tabs (23 tabs total).
+  + demo tabs (24 tabs total).
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
 
@@ -236,7 +236,9 @@ wasm wrappers can path-depend on it).
 `ra4m1_spi_slave_ok`, `ra4m1_map_can_fifo`, `ra4m1_can_fifo_ok`,
 `ra4m1_map_ctsu_mutual`, `ra4m1_ctsu_mutual_ok`,
 `ra4m1_map_usb_suspend_resume`, `ra4m1_usb_hid_keyboard`,
-`ra4m1_usb_suspend_resume_ok`, `ra4m1_map_sd_card`, `ra4m1_sd_ok`,
+`ra4m1_usb_suspend_resume_ok`, `ra4m1_map_usb_msc_mock` (NEW: BOT+SCSI
+INQUIRY/READ_CAPACITY/READ10/WRITE10 mock chip over bulk pipes),
+`ra4m1_map_sd_card`, `ra4m1_sd_ok`,
 `ra4m1_map_can_errors`, `ra4m1_can_error_ok`, `ra4m1_map_dtc_repeat`,
 `ra4m1_dtc_ok`, `ra4m1_analogwave_ok` (NEW: real `analogWave.sine(10)`
 GPT->DTC->DAC12 sine proof, `r4aws.bin`), `ra4m1_pwm_ok`, `ra4m1_analogwrite_ok` (NEW: analogWrite(6,64) GPT0 GTPR97958 GTCCRB~24.5k via BER, OBE), `ra4m1_tone_ok` (NEW: tone(LED,440) GPT4 PERIODIC toggle), `ra4m1_map_can1_loopback`,
@@ -290,9 +292,9 @@ r4sser sources).
 ## 8. Browser demo (`demo/`)
 
 `./demo/build.sh` then `python3 -m http.server -d demo 8901`: three-page
-site (`index.html` demo + `docs.html` + `about.html`) driving the 228KB Minima
+site (`index.html` demo + `docs.html` + `about.html`) driving the 288KB Minima
 WASM (`WasmCpu` + the `usb_*` / `periph_*` free functions + `spi_set_sd_card`/
-`sd_read_block` for the SD tab). Twenty-three tabs run the vendored firmware
+`sd_read_block` for the SD tab). Twenty-four tabs run the vendored firmware
 live: Blink (LED + full
 12x16 GPIO grid from PORT, plus a MIPS meter in the stats), Serial (in-page virtual-host enumeration
 with step checklist, hello in the terminal, suspend/resume tail), Echo (bulk-pipe discovery
@@ -305,6 +307,7 @@ slave flag trace), SPI (SPI0 master vs SPI1 slave flag trace), SD (init
   GTPR/GTCCRB/GTIOR), AnalogWave (live DAC DADR sine sample),
   tone (live D13 toggle), SoftSerial (0xA5
   loopback via soft wire + UART peek), WDT (refresh-holds + expiry-latches),
+  Signal (IRQ + Serial1 + OPAMP + ADC), Engine (CAN/CANerr/DTC/Wire/SPI/susp),
   Matrix (12x8 charlieplex GPIO render), Docs (short pointer to `docs.html`).
   Flag traces poll MMIO only - data
 registers (ICDRR/SPDR) are never read (a read would eat the firmware's
