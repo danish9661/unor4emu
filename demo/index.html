@@ -40,7 +40,7 @@
   <section class="card board-card">
     <div class="card-title">Board
       <span class="seg" role="group" aria-label="board target">
-        <button id="tgt-minima" class="seg-btn active">Minima</button><button id="tgt-ek" class="seg-btn">EK-RA4M1</button>
+        <button id="tgt-minima" class="seg-btn active">Minima</button><button id="tgt-wifi" class="seg-btn">WiFi</button><button id="tgt-ek" class="seg-btn">EK-RA4M1</button>
       </span>
       <span id="run-state" class="state paused">paused</span></div>
     <div class="board-wrap">
@@ -111,6 +111,7 @@
       <button class="tab" data-tab="ctsu" role="tab">CTSU</button>
       <button class="tab" data-tab="hid" role="tab">HID</button>
       <button class="tab" data-tab="wdt" role="tab">WDT</button>
+      <button class="tab" data-tab="signal" role="tab">Signal</button>
       <button class="tab" data-tab="matrix" role="tab">Matrix</button>
       <button class="tab" data-tab="ek" role="tab">EK-RA4M1</button>
       <button class="tab" data-tab="docs" role="tab">Docs</button>
@@ -303,6 +304,20 @@
       </div>
       <ol id="wdt-steps" class="enum"></ol>
       <div id="wdt-verdict" class="term small"></div>
+    </div>
+
+    <div class="tabpane" id="pane-signal">
+      <p class="desc">Interrupt and analog signal chain on real Arduino APIs: press the virtual button (IRQ0 falling edge lights D13 via <span class="mono">attachInterrupt</span>), ping <span class="mono">Serial1</span> (SCI2 loopback), and watch the OPAMP follower and ADC readings live.</p>
+      <div class="row">
+        <button id="btn-signal-run" class="btn-acc">Run signal demo</button>
+        <button id="btn-signal-press" class="btn-ghost">Press button (IRQ0)</button>
+      </div>
+      <div class="row">
+        <input id="signal-in" class="textin" placeholder="type bytes for Serial1 echo…" maxlength="60">
+        <button id="btn-signal-send" class="btn-acc">Send</button>
+      </div>
+      <ol id="signal-steps" class="enum"></ol>
+      <div id="signal-verdict" class="term small"></div>
     </div>
 
     <div class="tabpane" id="pane-matrix">

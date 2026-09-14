@@ -21,5 +21,6 @@ cp core/blinky/r4blink.bin core/blinky/r4serial.bin core/blinky/r4echo.bin \
    core/blinky/r4aws.bin \
    core/blinky/r4rtcalm.bin core/blinky/r4canbo.bin core/blinky/r4can1.bin \
    core/blinky/r4dac8.bin core/blinky/r4kint.bin core/blinky/r4ssi.bin \
-   core/blinky/r4wdtref.bin core/blinky/r4wdtexp.bin demo/fw/
+   core/blinky/r4wdtref.bin core/blinky/r4wdtexp.bin \
+   core/blinky/r4opamp.bin core/blinky/r4irq.bin core/blinky/r4serial1.bin demo/fw/
 ls -la demo/pkg demo/fw | head -n 20

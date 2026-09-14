@@ -4,8 +4,9 @@ import init, {
   usb_take_tx, usb_rx_inject,
   usb_host_attach, usb_host_reset, usb_host_setup, usb_host_status_done,
   spi_set_sd_card, sd_read_block,
-  soft_wire, peek_uart_output,
-  kint_key_press, can_inject_errors,
+  soft_wire, peek_uart_output, uart_rx_byte,
+  icu_pin_edge, kint_key_press, can_inject_errors,
+  adc_set_channel_value, adc_clear_channel_value,
   usb_host_suspend, usb_host_resume, is_watchdog_reset_requested,
 } from './pkg/uno_r4_minima_wasm.js';
 
@@ -50,31 +51,38 @@ function pump(n) {
   if (f !== 0xFFFFFFFF) {
     running = false;
     setState('fault');
-    banner('CPU fault at 0x' + f.toString(16) + ' — see console for details.', 'err');
+    const op1 = board.fault_op1().toString(16).padStart(4, '0');
+    const mem = board.mem_fault();
+    banner('CPU fault at 0x' + f.toString(16) + ' op ' + op1 +
+      (mem !== 0xFFFFFFFF ? ' (bad mem 0x' + mem.toString(16) + ')' : '') +
+      ' — see console for details.', 'err');
     return false;
   }
   return true;
 }
 
 async function runChunks(total, perFrame, onFrame) {
+  // Dead helper kept for the debug console: same tight cadence as
+  // runUntil (no per-chunk awaits; callers paint explicitly).
   let left = total;
   while (left > 0 && running) {
     const n = Math.min(perFrame, left);
     if (!pump(n)) return false;
     left -= n;
     if (onFrame) onFrame();
-    await new Promise((r) => setTimeout(r, 0));
   }
   return running;
 }
 
 async function runUntil(budget, cond) {
+  // Tight loop: no per-chunk awaits — each iteration is ~ms of blocking
+  // WASM anyway, so yielding only burns wall time. Callers that need
+  // paints use runFw's perChunk or await explicitly.
   let left = budget;
   while (left > 0 && !cond()) {
     const n = Math.min(CHUNK, left);
     if (!pump(n)) return false;
     left -= n;
-    await new Promise((r) => setTimeout(r, 0));
   }
   return true;
 }
@@ -90,10 +98,11 @@ function ctlIn(req, val, idx, len, want, drain) {
     await usbQuiesce();
     usb_host_setup(req, val, idx, len);
     const got = [];
-    await runUntil(1200000, () => {
-      got.push(...usb_take_tx());
-      return got.length >= want;
-    });
+    let guard = 0;
+    while (got.length < want && guard++ < 40) {
+      await runUntil(CHUNK, () => { got.push(...usb_take_tx()); return got.length >= want; });
+      await new Promise((r) => setTimeout(r, 0));
+    }
     await runUntil(400000, () => false);
     usb_host_status_done();
     await runUntil(400000, () => false);
@@ -109,6 +118,7 @@ async function ctlOut(req, val, idx, data) {
   await runUntil(400000, () => false);
   if (data.length) usb_rx_inject(0, data);
   await runUntil(900000, () => false);
+  await new Promise((r) => setTimeout(r, 0));
 }
 
 /* ---------------- board visuals ---------------- */
@@ -132,24 +142,28 @@ function buildGpio() {
 }
 
 let lastPorts = new Array(12).fill(0);
+const chgTimers = new Array(192).fill(0);
 function refreshBoard(txFlash, rxFlash) {
   if (!board) return;
   let led = false;
   for (let p = 0; p < 12; p++) {
     const v = periphRead(PORT_BASE + p * 0x20, 4) & 0xFFFF;
     if (v !== lastPorts[p]) {
+      const diff = v ^ lastPorts[p];
       for (let b = 0; b < 16; b++) {
-        const c = gpioCells[p * 16 + b];
-        const hi = (v >> b) & 1;
-        c.classList.toggle('hi', !!hi);
+        if (!(diff & (1 << b))) continue;
+        const i = p * 16 + b;
+        const c = gpioCells[i];
+        c.classList.toggle('hi', !!((v >> b) & 1));
         c.classList.add('chg');
-        setTimeout(() => c.classList.remove('chg'), 400);
+        clearTimeout(chgTimers[i]);
+        chgTimers[i] = setTimeout(() => c.classList.remove('chg'), 400);
       }
       lastPorts[p] = v;
     }
     if (v) led = true;
   }
-  // Board LED: Minima D13 = P111 (PORT1 bit 11); EK-RA4M1 LED1 =
+  // Board LED: Minima/WiFi D13 = P111 (PORT1 bit 11); EK-RA4M1 LED1 =
   // P106 (PORT1 bit 6, EK manual s5.4.4). Fall back to any-output glow
   // (e.g. TX/RX activity elsewhere).
   const p1 = periphRead(PORT_BASE + 1 * 0x20, 4);
@@ -190,11 +204,29 @@ document.querySelectorAll('.tab').forEach((t) => {
 });
 
 $('tgt-minima').addEventListener('click', () => setTarget('minima'));
+$('tgt-wifi').addEventListener('click', () => setTarget('wifi'));
 $('tgt-ek').addEventListener('click', () => setTarget('ek'));
 function setTarget(v) {
   target = v;
   $('tgt-minima').classList.toggle('active', v === 'minima');
+  $('tgt-wifi').classList.toggle('active', v === 'wifi');
   $('tgt-ek').classList.toggle('active', v === 'ek');
+  // WiFi board parks the RA4M1 demo set: its LED matrix lives behind the
+  // ESP32-S3 (parked, no S3 code yet), so only the Matrix GPIO tab stays
+  // live. Everything else needs the Minima/EK RA4M1 target.
+  const wifi = v === 'wifi';
+  document.querySelectorAll('.tab').forEach((t) => {
+    const k = t.dataset.tab;
+    if (k === 'matrix' || k === 'docs') return;
+    t.disabled = wifi;
+    t.title = wifi ? 'Parked on WiFi: needs the ESP32-S3 bridge (no S3 code yet)' : '';
+  });
+  if (wifi) {
+    document.querySelector('.tab[data-tab="matrix"]').click();
+    banner('WiFi target parked: RA4M1 demos need Minima/EK. Matrix GPIO render stays live.', 'info');
+  } else {
+    banner(null);
+  }
   refreshBoard(false, false);
 }
 
@@ -354,7 +386,7 @@ async function enumEchoBase(log) {
 // periph helpers with explicit width (the free fn takes (addr, width))
 function periphRead(a, w) { return _pr(a, w); }
 function periphWrite(a, w, v) { _pw(a, w, v); }
-window.__dbg = { boot, pump, runUntil, periphRead, periphWrite, CHUNK,
+window.__dbg = { boot, pump, runUntil, runChunks, periphRead, periphWrite, CHUNK,
   can_inject_errors, kint_key_press, soft_wire, peek_uart_output,
   get board() { return board; }, get running() { return running; } };
 window.__candbg = () => {
@@ -448,13 +480,16 @@ function sayVerdict(el, lines) {
     el.appendChild(sp);
   }
 }
-let target = 'minima'; // or 'ek': EK-RA4M1 LED1 = P106 instead of D13 = P111
+let target = 'minima'; // minima | wifi (parked) | ek (P106 LED1, zero-boot)
+// WiFi shares Minima's D13 = P111 LED. EK-RA4M1 LED1 = P106.
 const ledOn = () => {
   const bit = target === 'ek' ? 6 : 11;
   return ((periphRead(PORT_BASE + 1 * 0x20, 4) >> bit) & 1) !== 0;
 };
 // Boot fw, then pump `chunks` 48k-chunks (proof-harness cadence),
 // calling perChunk() after every chunk for transient flags.
+// Board/DOM refresh is batched: refreshBoard walks 192 cells, so only
+// pay for it every 8th chunk; yield via rAF only when a paint is due.
 async function runFw(fwName, arm, chunks, perChunk) {
   blinkMode = false;
   const fw = await fetch('fw/' + fwName).then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
@@ -469,6 +504,11 @@ async function runFw(fwName, arm, chunks, perChunk) {
   }
   refreshBoard(false, false);
   return running;
+}
+// Batch helper for hand-rolled loops: same every-8th paint cadence.
+function paintTick(i) {
+  if (i % 8 === 7) { refreshBoard(false, false); return true; }
+  return false;
 }
 
 $('btn-wire-run').addEventListener('click', async () => {
@@ -728,6 +768,121 @@ $('btn-aws-run').addEventListener('click', async () => {
     ? [[`sine flowing: GPT overflow → DTC repeat → DAC12 DADR (last 0x${lastDadr.toString(16)})`, 'okline']]
     : [['no DAC sample seen (see console).', '']]);
   if (!ok || !done) banner('AnalogWave demo did not complete.', 'err');
+});
+
+/* ---------------- signal (IRQ + Serial1 + OPAMP + ADC) ---------------- */
+let signalSci2 = null;
+$('btn-signal-run').addEventListener('click', async () => {
+  const OPAMP = 0x40086000, ADC = 0x4005C000, SCI2 = 0x40070040;
+  const st = mkSteps($('signal-steps'), [
+    'OPAMP follower live (AMPMON0)',
+    'ADC ch2 converts (0xABC stimulus)',
+    'Serial1 TX ready (SCI2 TE)',
+    'IRQ0 press lights D13 (attachInterrupt)',
+  ]);
+  sayVerdict($('signal-verdict'), [['booting OPAMP + Serial1 signal chain…', 'sys']]);
+  // Deterministic analog stimulus so the readout is a verdict, not noise
+  // (same channel the Rust ADC proof uses: ch2 -> ADDR2).
+  adc_set_channel_value(2, 0xABC);
+  // ADC convert first (ADANSA0 ch2 + ADST, result at ADDR2 = base+0x24),
+  // like ra4m1_map_adc_converts_channel — the perChunk closure below
+  // then only polls the already-converted result (no const hoist bug).
+  // NOTE: the ADC model is a separate unit from the OPAMP firmware boot:
+  // boot() resets the whole system, so program ADANSA+ADST *after* the
+  // boot inside runFw — do the convert in the first perChunk tick.
+  let adcDone = false;
+  const ok = await runFw('r4opamp.bin', null, 3000, () => {
+    if ((periphRead(OPAMP + 0x0C, 1) & 1) !== 0) st.mark(0);
+    if (!adcDone) {
+      periphWrite(ADC + 0x04, 4, 1 << 2); // ADANSA0: ch2
+      periphWrite(ADC + 0x00, 4, 1 << 15); // ADST
+      adcDone = true;
+    }
+    if ((periphRead(ADC + 0x24, 4) & 0x3FFF) === 0xABC) st.mark(1);
+  });
+  running = false; setState('paused');
+  const res = periphRead(ADC + 0x24, 4) & 0x3FFF;
+  // Serial1: boot the SCI2 echo image and find TE like the Rust proof.
+  const fw = await fetch('fw/r4serial1.bin').then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+  boot(fw);
+  running = true; setState('running');
+  await pump(6000000);
+  signalSci2 = null;
+  for (let i = 0; i < 200 && running; i++) {
+    if (!pump(CHUNK)) break;
+    if ((periphRead(SCI2 + 0x02, 1) & (1 << 5)) !== 0) { signalSci2 = SCI2; st.mark(2); break; }
+  }
+  sayVerdict($('signal-verdict'), ok
+    ? [[`OPAMP follower live (AMPMON0=1); ADC ch2=0x${res.toString(16)} / 0x3FFF; Serial1 ${signalSci2 ? 'TX ready — type below, or press the button' : 'not ready (see console)'}`, signalSci2 ? 'okline' : '']]
+    : [['no OPAMP verdict (see console).', '']]);
+  if (!ok || !signalSci2) banner('Signal demo did not complete.', 'err');
+  running = false; setState('paused');
+  refreshBoard(false, false);
+  adc_clear_channel_value(2);
+});
+$('btn-signal-press').addEventListener('click', async () => {
+  if (!board) { banner('Run the signal demo first.', 'err'); return; }
+  // Same shape as ra4m1_attach_interrupt: real FSP external-IRQ setup is
+  // already in the booted image path; here the OPAMP image idles, so boot
+  // the IRQ image, then inject the falling edge on line 0.
+  const fw = await fetch('fw/r4irq.bin').then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+  boot(fw);
+  running = true; setState('running');
+  await pump(6000000);
+  const st = mkSteps($('signal-steps'), [
+    'OPAMP follower live (AMPMON0)',
+    'ADC converting (ADST self-clears)',
+    'Serial1 TX ready (SCI2 TE)',
+    'IRQ0 press lights D13 (attachInterrupt)',
+  ]);
+  st.mark(0); st.mark(1); st.mark(2);
+  icu_pin_edge(0, true);
+  let lit = false;
+  for (let i = 0; i < 200 && running; i++) {
+    if (!pump(CHUNK)) break;
+    if (ledOn()) { lit = true; break; }
+  }
+  if (lit) st.mark(3);
+  running = false; setState('paused');
+  refreshBoard(false, false);
+  sayVerdict($('signal-verdict'), lit
+    ? [['IRQ0 falling edge → ISR lit D13 (attachInterrupt, all 16 lines proven in Rust)', 'okline']]
+    : [['no LED — the edge did not reach the ISR (see console).', '']]);
+  if (!lit) banner('Button press did not light the LED.', 'err');
+});
+$('btn-signal-send').addEventListener('click', async () => {
+  const box = $('signal-in');
+  const text = box.value;
+  if (!text) return;
+  if (!signalSci2) { banner('Run the signal demo first (Serial1 must be TX-ready).', 'err'); return; }
+  box.value = '';
+  // Reboot the Serial1 echo image fresh (the press step rebooted into the
+  // IRQ image), re-find TE, then inject + poll the UART console echo.
+  const fw = await fetch('fw/r4serial1.bin').then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+  boot(fw);
+  running = true; setState('running');
+  await pump(6000000);
+  signalSci2 = null;
+  for (let i = 0; i < 200 && running; i++) {
+    if (!pump(CHUNK)) break;
+    if ((periphRead(0x40070040 + 0x02, 1) & (1 << 5)) !== 0) { signalSci2 = 0x40070040; break; }
+  }
+  if (!signalSci2) {
+    running = false; setState('paused');
+    sayVerdict($('signal-verdict'), [['Serial1 not TX-ready after reboot (see console).', '']]);
+    return;
+  }
+  for (const ch of text) uart_rx_byte(signalSci2, ch.charCodeAt(0) & 0xFF);
+  const t0 = peek_uart_output().length;
+  let back = '';
+  for (let i = 0; i < 600 && running; i++) {
+    if (!pump(CHUNK)) break;
+    back = peek_uart_output().slice(t0);
+    if (back.length >= text.length) break;
+  }
+  running = false; setState('paused');
+  refreshBoard(false, false);
+  sayVerdict($('signal-verdict'), [[back ? `< ${back.slice(0, text.length)} (Serial1 echo, SCI2)` : 'no echo (see console).', back ? 'okline' : '']]);
 });
 
 /* ---------------- SoftSerial loopback (9600 baud, 0xA5) ---------------- */

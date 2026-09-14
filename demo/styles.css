@@ -135,6 +135,7 @@ h1 span { color: var(--brass); font-weight: 600; }
   background: transparent; color: var(--dim); font-weight: 700; cursor: pointer;
 }
 .tab.active { background: #3a2f14; color: var(--brass-hi); border-color: var(--brass-dim); }
+.tab:disabled { opacity: .38; cursor: not-allowed; }
 .tabpane { display: none; }
 .tabpane.active { display: block; }
 .desc { color: var(--dim); font-size: 13.5px; margin: 0 0 12px; }
