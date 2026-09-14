@@ -278,8 +278,12 @@ at zero executes shifted garbage (looks plausible, faults in an epilogue).
 (SSI audio FIFO), `core/blinky/r4matrix.bin` (LED matrix smiley),
 `core/blinky/r4aw.bin` (analogWrite), `core/blinky/r4tone.bin` (tone),
 `core/blinky/r4sser.bin` (SoftwareSerial), `core/blinky/r4rtcalm.bin`
-(RTC alarm), `core/blinky/r4canbo.bin` (CAN bus-off) are the vendored
-USB/I2C/SPI/CAN/touch/HID/SD/DTC/PWM proof builds, compiled the same
+(RTC alarm), `core/blinky/r4canbo.bin` (CAN bus-off), `core/blinky/r4rtc.bin`
+(RTC), `core/blinky/r4wdtref.bin`/`r4wdtexp.bin` (WDT refresh/expiry),
+`core/blinky/r4can.bin` (CAN self-test), `core/blinky/r4opamp.bin` (OPAMP),
+`core/blinky/r4irq.bin` (attachInterrupt), `core/blinky/r4serial1.bin`
+(Serial1 echo) are the vendored
+USB/I2C/SPI/CAN/touch/HID/SD/DTC/PWM/RTC/WDT proof builds, compiled the same
 way from their sketches (`core/blinky/sketches/` holds the r4aw/r4tone/
 r4sser sources).
 
