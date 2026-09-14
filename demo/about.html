@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23e0a83c'/%3E%3Ctext x='32' y='42' font-family='monospace' font-size='28' font-weight='bold' text-anchor='middle' fill='white'%3ER4%3C/text%3E%3C/svg%3E">
+<title>About — UNO R4 Minima emulator</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip-link" href="#content">Skip to content</a>
+<div class="bg-grid"></div>
+<nav class="sitenav" aria-label="Site">
+  <div class="sitenav-in">
+    <a class="sitenav-brand" href="index.html">UNO R4 <b>Minima</b> emulator</a>
+    <div class="sitenav-links">
+      <a href="index.html">Demo</a>
+      <a href="docs.html">Docs</a>
+      <a href="about.html" aria-current="page">About</a>
+    </div>
+  </div>
+</nav>
+<main class="page" id="content">
+  <div class="page-head">
+    <p class="page-kicker">What this is · how it works</p>
+    <h1 class="page-title">About</h1>
+    <p class="page-lede">A cycle-driven emulator for the Arduino UNO R4 Minima that runs real Arduino firmware — the actual <code>Blink.ino</code>, the real ArduinoCore libraries — in the browser via Rust compiled to WebAssembly.</p>
+  </div>
+
+  <div class="page-toc">
+    <b>On this page:</b>
+    <a href="#product">The product</a> ·
+    <a href="#chip">The chip</a> ·
+    <a href="#method">How it is proven</a> ·
+    <a href="#limits">Limits</a>
+  </div>
+
+  <h2 id="product">The product</h2>
+  <p>This page exists for one reader: someone deciding whether to trust the Demo tab next to it. The emulator models the RA4M1 microcontroller at the register level — every peripheral is a Rust model behind the real memory-mapped address — and runs unmodified firmware images built with <code>arduino-cli</code> against ArduinoCore-renesas 1.6.0. The Arduino core wraps Renesas FSP, and FSP runs <em>on</em> the emulated core, so register-accurate models are enough: no firmware is rewritten or stubbed for the emulator.</p>
+  <p>The browser build is small on purpose: the R4-only core links just <code>wasm-bindgen</code> plus a panic hook — no STM32 leftovers, no ESP32 radio. The WiFi board's second chip stays parked until its code is ready.</p>
+
+  <h2 id="chip">The chip</h2>
+  <p>The board is the Minima: Renesas RA4M1 <code>R7FA4M1AB3CFM</code>, a Cortex-M4F at 48&nbsp;MHz with 256&nbsp;KB of flash at <code>0x00000000</code>, 32&nbsp;KB of SRAM at <code>0x20000000</code>, and 8&nbsp;KB of data flash. The on-board bootloader occupies <code>0x0000–0x3FFF</code>, so apps link at <code>0x4000</code> and the emulator boots from that table. The same silicon ships on the EK-RA4M1 kit in a bigger package — the Demo page has a tab that boots a bare-metal image at zero and lights its P106 LED1 to prove it.</p>
+
+  <h2 id="method">How it is proven</h2>
+  <p>Every peripheral carries a proof, and every proof runs the same shape: build a fresh emulated system, write real MMIO, tick, assert state. Register-level proofs pin down single peripherals; firmware proofs boot vendored <code>r4*.bin</code> images — the real Arduino libraries driving the real FSP drivers — and assert the observable outcome: a toggled LED, a DAC sample, a round-tripped byte, an enumerated USB device.</p>
+  <p>Two Rust suites hold the line: the snapshot core (117 tests: 37 legacy CPU/system + 80 R4 proofs) and the small R4-only core (80 R4 proofs), always run single-threaded because the cores share process globals. When a firmware stall traced back to the CPU — predicated Thumb flags, the flagless MOV-register alias, the DTC repeat-length counter — the fix went into both cores with a GAS-assembled encoding probe as ground truth, and the upstream bug tracker got the entry. Nothing is worked around in board code.</p>
+  <p>The Demo page replays 23 of those proofs live: each tab boots its firmware image in the WASM core and polls live registers for the verdict. Flag traces read status registers only — data registers are never touched, because reading one would eat the firmware's byte.</p>
+
+  <h2 id="limits">Limits</h2>
+  <ul>
+    <li>The WiFi board's ESP32-S3 is parked; this build is Minima only.</li>
+    <li>Some silicon has no Arduino consumer (SLCDC panel, TSN trim beyond constants, CAN1 events) — those proofs are register-level plus bare-metal firmware by design.</li>
+    <li>The in-tree Arduino I2S library does not compile upstream, so SSI audio is proven bare-metal; USB MSC and on-chip FAT are closed out as impossible-or-unconsumed with reasons in the Docs table.</li>
+    <li>Virtual time runs on instruction count; ADC converts instantly; the RTC alarm is evaluated per tick. These are documented in <a href="docs.html#quirks">Docs quirks</a>, each covered by its proof.</li>
+  </ul>
+</main>
+<div class="foot-nav">
+  <a class="btn-ghost" href="index.html" style="text-decoration:none">Back to demo</a>
+  <a class="btn-ghost" href="docs.html" style="text-decoration:none">Read the docs</a>
+</div>
+<footer>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (117 + 80 Rust proofs) · no STM32, no ESP32 in this build</span>
+</footer>
+</body>
+</html>

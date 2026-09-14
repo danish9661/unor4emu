@@ -289,10 +289,11 @@ r4sser sources).
 
 ## 8. Browser demo (`demo/`)
 
-`./demo/build.sh` then `python3 -m http.server -d demo 8901`: dark
-single page driving the 228KB Minima WASM (`WasmCpu` + the `usb_*` /
-`periph_*` free functions + `spi_set_sd_card`/`sd_read_block` for the
-SD tab). Twenty-three tabs run the vendored firmware live: Blink (LED + full
+`./demo/build.sh` then `python3 -m http.server -d demo 8901`: three-page
+site (`index.html` demo + `docs.html` + `about.html`) driving the 228KB Minima
+WASM (`WasmCpu` + the `usb_*` / `periph_*` free functions + `spi_set_sd_card`/
+`sd_read_block` for the SD tab). Twenty-three tabs run the vendored firmware
+live: Blink (LED + full
 12x16 GPIO grid from PORT, plus a MIPS meter in the stats), Serial (in-page virtual-host enumeration
 with step checklist, hello in the terminal, suspend/resume tail), Echo (bulk-pipe discovery
 via PIPECFG + typed round-trip), Wire (IIC1 master vs bare-metal IIC0
@@ -304,12 +305,13 @@ slave flag trace), SPI (SPI0 master vs SPI1 slave flag trace), SD (init
   GTPR/GTCCRB/GTIOR), AnalogWave (live DAC DADR sine sample),
   tone (live D13 toggle), SoftSerial (0xA5
   loopback via soft wire + UART peek), WDT (refresh-holds + expiry-latches),
-  Matrix (12x8 charlieplex GPIO render), Docs (coverage table).
+  Matrix (12x8 charlieplex GPIO render), Docs (short pointer to `docs.html`).
   Flag traces poll MMIO only - data
 registers (ICDRR/SPDR) are never read (a read would eat the firmware's
 byte); sub-word reads return unmasked packs, so JS masks (`% 256`).
 D13 = P111 (PORT1 bit 11), not bit 13. `demo/pkg/` + `demo/fw/` are
-generated (git-ignored); only `index.html`/`app.js`/`styles.css`/
-`build.sh` are tracked. Verified with Playwright screenshots (every
+generated (git-ignored); only `index.html`/`docs.html`/`about.html`/
+`app.js`/`styles.css`/`build.sh` are tracked. Verified with Playwright
+screenshots (every
 tab to green verdict), console clean. Deploys to GitHub Pages via
 `.github/workflows/pages.yml` (rebuilds pkg+fw, publishes `demo/`).

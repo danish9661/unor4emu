@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23e0a83c'/%3E%3Ctext x='32' y='42' font-family='monospace' font-size='28' font-weight='bold' text-anchor='middle' fill='white'%3ER4%3C/text%3E%3C/svg%3E">
+<title>Docs — UNO R4 Minima emulator</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip-link" href="#content">Skip to content</a>
+<div class="bg-grid"></div>
+<nav class="sitenav" aria-label="Site">
+  <div class="sitenav-in">
+    <a class="sitenav-brand" href="index.html">UNO R4 <b>Minima</b> emulator</a>
+    <div class="sitenav-links">
+      <a href="index.html">Demo</a>
+      <a href="docs.html" aria-current="page">Docs</a>
+      <a href="about.html">About</a>
+    </div>
+  </div>
+</nav>
+<main class="page" id="content">
+  <div class="page-head">
+    <p class="page-kicker">RA4M1 · R7FA4M1AB3CFM</p>
+    <h1 class="page-title">Docs</h1>
+    <p class="page-lede">What this emulator covers: every row is a feature of the Arduino UNO R4 Minima variant, whether the silicon has it, what the emulator does with it, and how it is proven. Full proofs live in the repo as <code>cargo test</code>, 117 + 80 green.</p>
+  </div>
+
+  <div class="page-toc">
+    <b>On this page:</b>
+    <a href="#coverage">Coverage</a> ·
+    <a href="#proofs">Proof inventory</a> ·
+    <a href="#quirks">Known quirks</a> ·
+    <a href="#build">Build and test</a>
+  </div>
+
+  <h2 id="coverage">Coverage</h2>
+  <p>“Proof” names the Rust test or the live Demo tab that exercises the model. Live tabs replay their proof firmware in the browser; register proofs hold MMIO behavior with no Arduino consumer.</p>
+  <table>
+    <thead><tr><th>Feature</th><th>Minima HW</th><th>Status</th><th>Proof / note</th></tr></thead>
+    <tbody>
+    <tr><td>Cortex-M4F CPU</td><td>yes</td><td class="st-done">Done</td><td>37 legacy CPU/system tests</td></tr>
+    <tr><td>NVIC / SysTick / SCB / MPU / FPU</td><td>yes</td><td class="st-done">Done</td><td>reused ARM models; VTOR keeps bits[31:7]</td></tr>
+    <tr><td>SYSTEM / MSTP / ICU / ELC</td><td>yes</td><td class="st-done">Done</td><td>IELSR routing incl. DTCE; pin-edge injection</td></tr>
+    <tr><td>PORT + PFS GPIO</td><td>yes</td><td class="st-done">Done</td><td>real PCNTR layout; live grid on the Demo page</td></tr>
+    <tr><td>attachInterrupt</td><td>yes</td><td class="st-done">Done</td><td>all 16 lines, button-sketch proof</td></tr>
+    <tr><td>SCI0-9 UART</td><td>yes</td><td class="st-done">Done</td><td>byte-exact; Serial + Serial1 (SCI2) proofs</td></tr>
+    <tr><td>SCI simple-SPI</td><td>yes</td><td class="st-done">Done</td><td>shift + loopback jig</td></tr>
+    <tr><td>SPI0/1 master</td><td>yes (D11-13 = ch1)</td><td class="st-done">Done</td><td>polled SPRF + loopback; SPI tab</td></tr>
+    <tr><td>SPI slave</td><td>mode</td><td class="st-done">Done</td><td>MSTR=0 staging + exchange; SPI tab</td></tr>
+    <tr><td>Virtual SD (SPI mode)</td><td>card-dependent</td><td class="st-done">Done</td><td>CMD0/8/55/41/58/17/24; SD tab + MBR dump</td></tr>
+    <tr><td>I2C master</td><td>yes (Wire = IIC1)</td><td class="st-done">Done</td><td>EEPROM slave @0x50; Wire tab</td></tr>
+    <tr><td>I2C slave</td><td>mode</td><td class="st-done">Done</td><td>shared-bus fabric; Wire tab</td></tr>
+    <tr><td>GPT0-13</td><td>yes</td><td class="st-done">Done</td><td>real offsets; wrap/compare/overflow events</td></tr>
+    <tr><td>GPT PWM output</td><td>yes (D3/D5/D6/D9/D10/D11)</td><td class="st-done">Done</td><td>GTIO function 0 via PFS; 25% duty on D6; PWM tab</td></tr>
+    <tr><td>AGT0-5</td><td>yes</td><td class="st-done">Done</td><td>1 ms IRQs drive millis() in Blink</td></tr>
+    <tr><td>ADC14 / DAC12 / RTC+alarm</td><td>yes</td><td class="st-done">Done</td><td>convert, retained output, BCD rollover + event 38; RTC tab</td></tr>
+    <tr><td>DMAC memcopy / DTC repeat</td><td>yes</td><td class="st-done">Done</td><td>sync path; GPT-&gt;DAC proof + AnalogWave sine tab</td></tr>
+    <tr><td>WDT / IWDT</td><td>yes</td><td class="st-done">Done</td><td>refresh-holds + expiry-latches proofs; WDT tab</td></tr>
+    <tr><td>CRC / DOC / OPAMP / ACMP</td><td>yes</td><td class="st-done">Done</td><td>IEEE-802.3, follower + compare</td></tr>
+    <tr><td>USBFS CDC serial</td><td>yes (native USB)</td><td class="st-done">Done</td><td>enumerate / hello / echo; Serial + Echo tabs</td></tr>
+    <tr><td>USB HID keyboard</td><td>yes</td><td class="st-done">Done</td><td>report descriptor + INT-IN report proof; HID tab</td></tr>
+    <tr><td>USB suspend / resume</td><td>yes</td><td class="st-done">Done</td><td>DVSQ SUSPx, RESM, weak-callback proof; Serial tab tail</td></tr>
+    <tr><td>CTSU self + mutual touch</td><td>yes</td><td class="st-done">Done</td><td>counters + END event; CTSU tab</td></tr>
+    <tr><td>CAN0 mailbox + FIFO + errors</td><td>yes (CAN1: no events)</td><td class="st-done">Done</td><td>loopback, MB24 FIFO, isError proof; CAN + CAN err tabs</td></tr>
+    <tr><td>analogWrite (GPT0 PWM API)</td><td>yes (D6 = GTIOCB)</td><td class="st-done">Done</td><td>GTCCRD buffer + GTBER transfer; analogWrite tab</td></tr>
+    <tr><td>AnalogWave sine (GPT→DTC→DAC)</td><td>yes</td><td class="st-done">Done</td><td>analogWave.sine(10), 24 samples into DADR; AnalogWave tab</td></tr>
+    <tr><td>tone() (GPT PERIODIC IRQ)</td><td>yes</td><td class="st-done">Done</td><td>440 Hz toggle on D13; tone tab</td></tr>
+    <tr><td>SoftwareSerial 9600 loopback</td><td>lib (GPIO+GPT+DMAC)</td><td class="st-done">Done</td><td>0xA5 TX→RX via soft wire; SoftSerial tab</td></tr>
+    <tr><td>CAN1 mailbox</td><td>yes (no ELC events)</td><td class="st-done">Done</td><td>polled self-test loopback proof; misc tab</td></tr>
+    <tr><td>DAC8 8-bit</td><td>yes (no Arduino API)</td><td class="st-done">Done</td><td>retain + DAM gate proof; misc tab</td></tr>
+    <tr><td>TSN calibration</td><td>yes</td><td class="st-done">Done</td><td>fixed trim constants proof</td></tr>
+    <tr><td>SLCDC segment LCD</td><td>yes (no panel)</td><td class="st-done">Done</td><td>regs + 64B display RAM proof</td></tr>
+    <tr><td>KINT key interrupt</td><td>yes</td><td class="st-done">Done</td><td>key-press jig into event 69 + proof; misc tab</td></tr>
+    <tr><td>SSI0 audio FIFO</td><td>yes (I2S lib broken)</td><td class="st-done">Done</td><td>TX drain + RX pattern proof; misc tab</td></tr>
+    <tr><td>SSI1 audio FIFO</td><td>yes (FSP mask = SSI0 only)</td><td class="st-done">Done</td><td>same model, own slot/FIFOs; register proof</td></tr>
+    <tr><td>GPT OPS / POEG0-3 / R_DMA</td><td>stubs (no Arduino consumer)</td><td class="st-done">Done</td><td>accept-and-retain; register proof</td></tr>
+    <tr><td>LED matrix 12x8</td><td>GPIO-driven</td><td class="st-done">Done</td><td>charlieplex render; smiley proof + Matrix tab</td></tr>
+    <tr><td>Dataflash 8KB + FACI</td><td>yes</td><td class="st-done">Done</td><td>program/erase/blankcheck; EEPROM tab</td></tr>
+    <tr><td>Arduino EEPROM lib</td><td>via dataflash</td><td class="st-done">Done</td><td>round-trip proof; EEPROM tab</td></tr>
+    <tr><td>I2S audio (SSI)</td><td>no driver</td><td class="st-no">Left</td><td>in-tree I2S lib does not compile (no r_i2s_api.h)</td></tr>
+    <tr><td>USB MSC storage</td><td>no</td><td class="st-no">Left</td><td>no Arduino lib; CFG_TUD_MSC=0</td></tr>
+    <tr><td>FAT / LittleFS on-chip</td><td>constrained</td><td class="st-no">Left</td><td>FAT needs ≥32KB; LFS metadata exceeds 8KB dataflash</td></tr>
+    <tr><td>SDHI 4-bit SD host</td><td>no (not on RA4M1)</td><td class="st-no">Left</td><td>no peripheral; SDCard lib unpackaged</td></tr>
+    <tr><td>RTC alarm (Arduino lib)</td><td>yes</td><td class="st-done">Done</td><td>setAlarmCallback :00 match + callback; RTC alarm tab</td></tr>
+    <tr><td>CAN bus-off recovery</td><td>yes</td><td class="st-done">Done</td><td>BOEF + halt-clear + TX again; CAN err tab</td></tr>
+    <tr><td>EK-RA4M1 bare-metal target</td><td>eval kit (same silicon)</td><td class="st-done">Done</td><td>zero-boot + P106 LED1; EK-RA4M1 tab + board selector</td></tr>
+    <tr><td>WiFi / ESP32-S3</td><td>WiFi board only</td><td class="st-part">Parked</td><td>waiting on S3 code</td></tr>
+    <tr><td>CAN1 / DAC8 / TSN / LCD / KINT</td><td>no / unused</td><td class="st-part">Unmapped</td><td>deliberate; Arduino boot touches none</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="proofs">Proof inventory</h2>
+  <p>Snapshot core <code>core/ra4m1-periph-wasm</code>: <b>117</b> tests (37 legacy CPU/system + 80 R4 proofs). Small core <code>core/ra4m1-core</code>: <b>80</b> R4 proofs (79 mirror + EK zero-boot). Always run single-threaded — shared globals (<code>SYS</code>, <code>INSTRUCTION_COUNT</code>, UART buffer) flake in parallel.</p>
+  <pre><code>cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
+cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
+cargo build --manifest-path Cargo.toml</code></pre>
+  <h3>R4 proofs (<code>src/ra4m1.rs</code>, both cores)</h3>
+  <p>Boot and clock: <code>ra4m1_boots_from_zero</code>, <code>clock_stub_accepts_boot_writes</code>. GPIO and timers: <code>ra4m1_map_port_output_retained</code>, <code>ra4m1_map_gpt_counts_and_matches</code>, <code>ra4m1_map_agt_counts</code>, <code>ra4m1_map_elc_routes_software_event</code>. Analog and time: <code>ra4m1_map_adc_converts_channel</code>, <code>ra4m1_map_dac_output_retained</code>, <code>ra4m1_map_rtc_ticks_seconds</code>, <code>ra4m1_map_crc_and_doc</code>, <code>ra4m1_map_opamp_follower_and_acmp</code>. Firmware end-to-end: <code>ra4m1_firmware_blinky_via_mmio</code>, <code>ra4m1_arduino_blink_boots</code>, <code>ra4m1_arduino_blink_toggles_led</code>, <code>ra4m1_wire_ok</code>, <code>ra4m1_spi_ok</code>, <code>ra4m1_can_ok</code>, <code>ra4m1_dtc_ok</code>, <code>ra4m1_analogwave_ok</code>, <code>ra4m1_pwm_ok</code>, <code>ra4m1_analogwrite_ok</code>, <code>ra4m1_tone_ok</code>, <code>ra4m1_softserial_ok</code>, <code>ra4m1_matrix_ok</code>. Buses and storage: <code>ra4m1_map_sci_tx_reaches_console</code>, <code>ra4m1_map_sci_echo_path</code>, <code>ra4m1_map_sci_spi_loopback</code>, <code>ra4m1_map_spi_loopback</code>, <code>ra4m1_map_i2c_eeprom</code>, <code>ra4m1_map_i2c_slave</code>, <code>ra4m1_wire_slave_ok</code>, <code>ra4m1_map_spi_slave</code>, <code>ra4m1_spi_slave_ok</code>, <code>ra4m1_map_sd_card</code>, <code>ra4m1_sd_ok</code>, <code>ra4m1_map_can_loopback</code>, <code>ra4m1_map_can_fifo</code>, <code>ra4m1_can_fifo_ok</code>, <code>ra4m1_map_can_errors</code>, <code>ra4m1_can_error_ok</code>, <code>ra4m1_map_dtc_repeat</code>. USB: <code>ra4m1_map_usb_tx_reaches_capture</code>, <code>ra4m1_usb_enumerates_cdc</code>, <code>ra4m1_usb_serial_hello</code>, <code>ra4m1_usb_cdc_echo</code>, <code>ra4m1_map_ctsu_measures</code>, <code>ra4m1_map_usb_suspend_resume</code>, <code>ra4m1_usb_hid_keyboard</code>, <code>ra4m1_usb_suspend_resume_ok</code>. System and misc: <code>ra4m1_map_dmac_mem_to_mem</code>, <code>ra4m1_map_dataflash_program_erase</code>, <code>ra4m1_eeprom_ok</code>, <code>ra4m1_ite_add_imm_preserves_flags</code>, <code>ra4m1_map_icu_pin_irq</code>, <code>ra4m1_attach_interrupt</code>, <code>ra4m1_serial1_echo</code>, <code>ra4m1_map_extra_channels</code>, <code>ra4m1_rtc_firmware</code>, <code>ra4m1_map_rtc_alarm</code>, <code>ra4m1_wdt_refresh</code>, <code>ra4m1_wdt_expire</code>, <code>ra4m1_opamp_firmware</code>, <code>ra4m1_map_ctsu_mutual</code>, <code>ra4m1_ctsu_mutual_ok</code>, <code>ra4m1_map_can1_loopback</code>, <code>ra4m1_can1_ok</code>, <code>ra4m1_map_dac8</code>, <code>ra4m1_dac8_ok</code>, <code>ra4m1_map_tsn</code>, <code>ra4m1_map_slcdc</code>, <code>ra4m1_map_kint</code>, <code>ra4m1_kint_ok</code>, <code>ra4m1_map_ssi</code>, <code>ra4m1_ssi_ok</code>, <code>ra4m1_rtc_alarm_ok</code>, <code>ra4m1_map_can_busoff_recovery</code>, <code>ra4m1_can_busoff_ok</code>, <code>ra4m1_ek_ra4m1_zero_boot_p106_led</code>, <code>ra4m1_map_ssi1</code>, <code>ra4m1_map_gpt_protect_dma</code>.</p>
+
+  <h2 id="quirks">Known quirks</h2>
+  <ul>
+    <li>Run tests with <code>--test-threads=1</code>: shared <code>SYS</code>, instruction count, and UART buffer flake in parallel.</li>
+    <li><code>rx_inject</code> raises BRDY like hardware; CCPL is a strobe; CFIFO OUT drains are single bytes.</li>
+    <li>RIIC: ST auto-sets MST/TRS; TDRE+TXI fire on START; enables fire latched flags; the first RXI read is a dummy; restart-write has no completion event.</li>
+    <li>Virtual time runs on instruction count; ADC converts instantly; CAN loopback needs self-test mode; I2C slave jig lives at 0x50; SPI loopback is a test jig (open bus reads 0xFF); DTC transfers complete in the CPU run loop while staged.</li>
+    <li>GPT compares are crossing-detected; unprogrammed all-ones compares are bounded by the period so they never false-fire on wrap.</li>
+    <li>PORT and PFS are separate instances keyed by an explicit flag; PWM pins follow GPT latches only when PFS PSEL selects a GPT function.</li>
+    <li>DTC repeat/block length reads CRAL (R_DTC doubles length into CRAL+CRAH, so a programmed 24 reads back 0x1818).</li>
+    <li>Sub-word reads return unmasked packs in JS — mask with <code>% 256</code>. Data registers (ICDRR/SPDR) are never polled; a read would eat the firmware's byte.</li>
+    <li>D13 is P111 (PORT1 bit 11), not bit 13.</li>
+  </ul>
+
+  <h2 id="build">Build and test</h2>
+  <p>Top workspace builds Minima only; WiFi is parked and excluded. <code>demo/pkg/</code> + <code>demo/fw/</code> are generated (git-ignored); only <code>index.html</code>, <code>docs.html</code>, <code>about.html</code>, <code>app.js</code>, <code>styles.css</code>, <code>build.sh</code> are tracked.</p>
+  <pre><code>./demo/build.sh
+python3 -m http.server -d demo 8901
+cargo build --manifest-path Cargo.toml</code></pre>
+  <p>Vendored firmware (<code>core/blinky/r4*.bin</code>) is built with arduino-cli 1.6.0 and committed; the Pages workflow rebuilds <code>pkg</code>+<code>fw</code> and publishes <code>demo/</code>.</p>
+</main>
+<div class="foot-nav">
+  <a class="btn-ghost" href="index.html" style="text-decoration:none">Back to demo</a>
+  <a class="btn-ghost" href="about.html" style="text-decoration:none">About this project</a>
+</div>
+<footer>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (117 + 80 Rust proofs) · no STM32, no ESP32 in this build</span>
+</footer>
+</body>
+</html>
