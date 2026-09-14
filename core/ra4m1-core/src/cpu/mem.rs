@@ -362,7 +362,6 @@ impl FlatMemory {
 
     /// True for mapped normal memory (flash/RAM/extra). Periph accesses
     /// return earlier; anything else falls to the bus-fault bad-arms.
-    #[inline]
     #[inline(always)]
     fn mapped(&self, addr: u32) -> bool {
         is_periph(addr) || self.in_flash(addr) || self.in_ram(addr) || self.extra_idx(addr).is_some()
@@ -374,7 +373,6 @@ impl FlatMemory {
     /// faults regardless of the trap (the one observable MPU type rule).
     /// Like the MPU data path the faulting access completes dropped and
     /// raises before the next fetch (flags exact, PC deferred by one).
-    #[inline]
     #[inline(always)]
     fn unaligned_deny(&self, addr: u32, size: u32) -> bool {
         if !self.mapped(addr) {
@@ -396,7 +394,6 @@ impl FlatMemory {
     /// drops the access). Fast path is a single predictable-false branch
     /// when the MPU is off; unmapped addresses never reach here (callers
     /// check mapped-ness first and keep the legacy bad-address behavior).
-    #[inline]
     #[inline(always)]
     fn mpu_deny(&self, addr: u32, size: u32, write: bool) -> bool {
         if !crate::system::is_mpu_enabled() {
