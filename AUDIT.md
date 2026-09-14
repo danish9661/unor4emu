@@ -11,8 +11,7 @@ Playwright screenshots with a clean console.
 ## Verdict
 
 No — not everything is implemented. But nothing known is broken: both
-suites are green (206 + 79, single-threaded), the demo runs three real
-firmware images live, and every gap below is enumerated with its
+suites are green (117 + 80, single-threaded), the demo runs 23 tabs live, and every gap below is enumerated with its
 Arduino relevance. The pattern is consistent: everything the Arduino
 core drives on real Minima sketches is modeled and proven; the missing
 pieces are either unused by Arduino or parked platform work (WiFi).
@@ -149,5 +148,5 @@ Channel notes (verified, not assumed): Arduino PWM uses GPT0-7 only
 
 ## What's next (priority order)
 
-1. **Platform**: WiFi un-park (waiting on S3 code). Demo ships Blink/Serial/Echo/Wire/SPI/SD/CAN/EEPROM/PWM/analogWrite/tone/SoftSerial/RTC/CTSU/HID/Matrix/Docs tabs + MIPS meter + a Pages deploy workflow.
+1. **Platform**: WiFi un-park (waiting on S3 code). Demo ships Blink/Serial/Echo/Wire/SPI/SD/CAN/EEPROM/PWM/analogWrite/AnalogWave/tone/SoftSerial/RTC/CTSU/HID/WDT/Matrix/Docs tabs + MIPS meter + a Pages deploy workflow.
 2. **New models**: nothing with a buildable Arduino consumer remains (MSC lacks consumers and its core header hardcodes it off; FAT needs 32KB; SDHI has no on-chip peripheral — all closed with reasons above).

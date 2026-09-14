@@ -6,6 +6,7 @@ import init, {
   spi_set_sd_card, sd_read_block,
   soft_wire, peek_uart_output,
   kint_key_press, can_inject_errors,
+  usb_host_suspend, usb_host_resume, is_watchdog_reset_requested,
 } from './pkg/uno_r4_minima_wasm.js';
 
 const APP_BASE = 0x4000;
@@ -289,6 +290,27 @@ $('btn-serial-run').addEventListener('click', async () => {
   });
   if (ok && String.fromCharCode(...seen).includes('hello')) {
     enumStep('hello received', 'done');
+    // USB suspend/resume on the live enumerated port (r4susp.bin flow,
+    // virtual-host driven): idle the bus -> SUSPx + LED on, then resume
+    // activity -> RESM + LED off.
+    const sust = mkSteps($('susp-steps'), [
+      'bus idle 3 ms — suspend (DVSQ SUSPx)',
+      'LED on — suspend callback fired',
+      'bus activity — resume (RESM)',
+      'LED off — resume callback fired',
+    ]);
+    sayVerdict($('susp-verdict'), [['idling the bus into suspend…', 'sys']]);
+    usb_host_suspend();
+    const susp = await runUntil(600 * CHUNK, () => ledOn());
+    if (susp) { sust.mark(0); sust.mark(1); }
+    sayVerdict($('susp-verdict'), [['resuming the bus…', 'sys']]);
+    usb_host_resume();
+    const resm = await runUntil(600 * CHUNK, () => !ledOn());
+    if (resm) { sust.mark(2); sust.mark(3); }
+    sayVerdict($('susp-verdict'), susp && resm
+      ? [['suspend (LED on) → resume (LED off) on the live port', 'okline']]
+      : [['suspend/resume did not complete (see console).', '']]);
+    if (!susp || !resm) banner('Suspend/resume did not complete.', 'err');
   } else {
     banner('No hello arrived — the device may have stalled.', 'err');
   }
@@ -675,6 +697,39 @@ $('btn-tone-run').addEventListener('click', async () => {
   if (!ok || !done) banner('tone demo did not complete.', 'err');
 });
 
+/* ---------------- AnalogWave sine (Arduino API, GPT->DTC->DAC12) ---------------- */
+$('btn-aws-run').addEventListener('click', async () => {
+  const DAC = 0x4005E000, DTC = 0x40005400;
+  const st = mkSteps($('aws-steps'), [
+    'DTC vector table programmed (DTCVBR nonzero)',
+    'GPT running (a channel counting via GTSTR)',
+    'DADR0 sine sample seen (nonzero 12-bit)',
+    'LED on — sketch reached loop',
+  ]);
+  sayVerdict($('aws-verdict'), [['booting analogWave.sine(10) sketch…', 'sys']]);
+  let done = false, lastDadr = 0;
+  const ok = await runFw('r4aws.bin', null, 3000, () => {
+    if (periphRead(DTC + 4, 4) !== 0) st.mark(0);
+    for (let ch = 0; ch < 8; ch++) {
+      if ((periphRead(0x40078000 + ch * 0x100 + 0x04, 4) & (1 << ch)) !== 0) { st.mark(1); break; }
+    }
+    const dadr = periphRead(DAC, 4) & 0xFFF;
+    if (dadr !== 0) st.mark(2);
+    if (ledOn()) st.mark(3);
+    if (dadr !== 0 && dadr !== lastDadr) {
+      lastDadr = dadr;
+      sayVerdict($('aws-verdict'), [[`DADR0=0x${lastDadr.toString(16).padStart(3, '0')} (${lastDadr} / 4095) — sine sample live`, 'sys']]);
+    }
+    if (st.done[2] && st.done[3]) done = true;
+    refreshBoard(false, false);
+  });
+  running = false; setState('paused');
+  sayVerdict($('aws-verdict'), ok && done
+    ? [[`sine flowing: GPT overflow → DTC repeat → DAC12 DADR (last 0x${lastDadr.toString(16)})`, 'okline']]
+    : [['no DAC sample seen (see console).', '']]);
+  if (!ok || !done) banner('AnalogWave demo did not complete.', 'err');
+});
+
 /* ---------------- SoftSerial loopback (9600 baud, 0xA5) ---------------- */
 $('btn-sser-run').addEventListener('click', async () => {
   const st = mkSteps($('sser-steps'), [
@@ -994,6 +1049,41 @@ $('btn-hid-run').addEventListener('click', async () => {
     banner('HID bring-up failed: ' + e.message, 'err');
   }
   setState('paused'); running = false;
+});
+
+/* ---------------- WDT (refresh-holds + expiry-latches) ---------------- */
+$('btn-wdt-run').addEventListener('click', async () => {
+  const st = mkSteps($('wdt-steps'), [
+    'refresh sketch booted (8 s window)',
+    'no reset across 5000 chunks with refresh',
+    'expiry sketch booted (100 ms window)',
+    'reset latched without refresh',
+  ]);
+  sayVerdict($('wdt-verdict'), [['booting WDT refresh sketch…', 'sys']]);
+  let ok = await runFw('r4wdtref.bin', null, 5000, () => {
+    if (steps > 6000000) st.mark(0);
+    if (is_watchdog_reset_requested()) banner('WDT fired despite refresh — model bug.', 'err');
+  });
+  if (ok && !is_watchdog_reset_requested()) {
+    st.mark(0); st.mark(1);
+    sayVerdict($('wdt-verdict'), [['refresh holds: 5000 chunks, no reset latched', 'sys'], ['booting WDT expiry sketch…', 'sys']]);
+  } else {
+    sayVerdict($('wdt-verdict'), [['no verdict — the refresh flow did not complete (see console).', '']]);
+    banner('WDT demo did not complete.', 'err');
+    running = false; setState('paused');
+    return;
+  }
+  let fired = false;
+  ok = await runFw('r4wdtexp.bin', null, 6000, () => {
+    if (steps > 6000000) st.mark(2);
+    if (is_watchdog_reset_requested()) fired = true;
+  });
+  if (fired) st.mark(3);
+  running = false; setState('paused');
+  sayVerdict($('wdt-verdict'), ok && fired
+    ? [['refresh holds 5000 chunks; expiry latches the reset flag', 'okline']]
+    : [['no reset latched without refresh (see console).', '']]);
+  if (!ok || !fired) banner('WDT demo did not complete.', 'err');
 });
 
 /* ---------------- EK-RA4M1 (bare-metal zero-boot, P106 LED1) ---------------- */

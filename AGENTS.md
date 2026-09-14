@@ -94,7 +94,7 @@ wasm wrappers can path-depend on it).
 
 `Peripherals::new_ra4m1()` builds this map. `WasmSystem::new_ra4m1()` +
 `init_ra4m1()` install it. Legacy `new()`/`init()` (STM32 map) stay for the
-128 legacy CPU tests - do not delete until replacements are proven.
+37 legacy CPU/system tests - do not delete until replacements are proven.
 
 ## 4. Bus rules (byte-exact, no hacks)
 
@@ -207,7 +207,7 @@ wasm wrappers can path-depend on it).
   P105 RX IRQ0 via GPT4/GPT5 timers + DMAC0/DMAC1 PCNTR samples + ELC
   GPT_A link + soft_wire jig) are all proven end-to-end on real Arduino
   API with `r4aw`/`r4tone`/`r4sser` bins + `core/blinky/sketches/` sources
-  + demo tabs (21 tabs total).
+  + demo tabs (23 tabs total).
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
 
@@ -288,17 +288,18 @@ r4sser sources).
 `./demo/build.sh` then `python3 -m http.server -d demo 8901`: dark
 single page driving the 228KB Minima WASM (`WasmCpu` + the `usb_*` /
 `periph_*` free functions + `spi_set_sd_card`/`sd_read_block` for the
-SD tab). Twenty-one tabs run the vendored firmware live: Blink (LED + full
+SD tab). Twenty-three tabs run the vendored firmware live: Blink (LED + full
 12x16 GPIO grid from PORT, plus a MIPS meter in the stats), Serial (in-page virtual-host enumeration
-with step checklist, hello in the terminal), Echo (bulk-pipe discovery
+with step checklist, hello in the terminal, suspend/resume tail), Echo (bulk-pipe discovery
 via PIPECFG + typed round-trip), Wire (IIC1 master vs bare-metal IIC0
 slave flag trace), SPI (SPI0 master vs SPI1 slave flag trace), SD (init
 + MBR dump + block-1 recheck via export), CAN (RX-FIFO MB24 trace),
   EEPROM (live dataflash byte trace), PWM (live duty readout on D6),
   RTC (live BCD clock + rollover), CTSU (live SC/RC counters),
   HID (report descriptor + INT-IN 'a' report), analogWrite (live
-  GTPR/GTCCRB/GTIOR), tone (live D13 toggle), SoftSerial (0xA5
-  loopback via soft wire + UART peek),
+  GTPR/GTCCRB/GTIOR), AnalogWave (live DAC DADR sine sample),
+  tone (live D13 toggle), SoftSerial (0xA5
+  loopback via soft wire + UART peek), WDT (refresh-holds + expiry-latches),
   Matrix (12x8 charlieplex GPIO render), Docs (coverage table).
   Flag traces poll MMIO only - data
 registers (ICDRR/SPDR) are never read (a read would eat the firmware's

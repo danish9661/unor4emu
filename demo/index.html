@@ -20,7 +20,7 @@
   <div class="badges">
     <span class="badge">R7FA4M1AB3CFM</span>
     <span class="badge">Cortex-M4F @ 48MHz</span>
-    <span class="badge ok">206 proofs green</span>
+    <span class="badge ok">197 proofs green</span>
     <span class="badge" id="wasm-size">228 KB wasm</span>
   </div>
 </header>
@@ -90,6 +90,7 @@
       <button class="tab" data-tab="eep" role="tab">EEPROM</button>
       <button class="tab" data-tab="pwm" role="tab">PWM</button>
       <button class="tab" data-tab="aw" role="tab">analogWrite</button>
+      <button class="tab" data-tab="aws" role="tab">AnalogWave</button>
       <button class="tab" data-tab="tone" role="tab">tone</button>
       <button class="tab" data-tab="sser" role="tab">SoftSerial</button>
       <button class="tab" data-tab="rtcalm" role="tab">RTC alarm</button>
@@ -98,6 +99,7 @@
       <button class="tab" data-tab="rtc" role="tab">RTC</button>
       <button class="tab" data-tab="ctsu" role="tab">CTSU</button>
       <button class="tab" data-tab="hid" role="tab">HID</button>
+      <button class="tab" data-tab="wdt" role="tab">WDT</button>
       <button class="tab" data-tab="matrix" role="tab">Matrix</button>
       <button class="tab" data-tab="ek" role="tab">EK-RA4M1</button>
       <button class="tab" data-tab="docs" role="tab">Docs</button>
@@ -114,13 +116,15 @@
     </div>
 
     <div class="tabpane" id="pane-serial">
-      <p class="desc">Real <span class="mono">Serial</span> sketch over emulated USBFS: the page plays virtual host (attach &rarr; reset &rarr; descriptors &rarr; line coding &rarr; DTR), then <span class="mono">Serial.println("hello")</span> lands here.</p>
+      <p class="desc">Real <span class="mono">Serial</span> sketch over emulated USBFS: the page plays virtual host (attach &rarr; reset &rarr; descriptors &rarr; line coding &rarr; DTR), then <span class="mono">Serial.println("hello")</span> lands here. Afterwards the bus idles into suspend (LED on) and resumes on activity (LED off) — the suspend/resume verdict.</p>
       <div class="row">
         <button id="btn-serial-run" class="btn-acc">Enumerate &amp; run</button>
         <button id="btn-serial-stop" class="btn-ghost">Stop</button>
       </div>
       <ol id="enum-steps" class="enum"></ol>
       <div id="term" class="term" aria-live="polite"></div>
+      <ol id="susp-steps" class="enum"></ol>
+      <div id="susp-verdict" class="term small"></div>
     </div>
 
     <div class="tabpane" id="pane-echo">
@@ -198,6 +202,15 @@
       <div id="aw-verdict" class="term small"></div>
     </div>
 
+    <div class="tabpane" id="pane-aws">
+      <p class="desc">Real ArduinoCore <span class="mono">analogWave.sine(10)</span>: an FspTimer PERIODIC overflow drives R_DTC repeat transfers of 24 sine samples into DAC12 DADR — the live DADR readout below is the verdict (the sine value, not a pin).</p>
+      <div class="row">
+        <button id="btn-aws-run" class="btn-acc">Run AnalogWave demo</button>
+      </div>
+      <ol id="aws-steps" class="enum"></ol>
+      <div id="aws-verdict" class="term small"></div>
+    </div>
+
     <div class="tabpane" id="pane-tone">
       <p class="desc">Real ArduinoCore <span class="mono">tone(LED_BUILTIN, 440)</span>: an FspTimer in PERIODIC mode toggles D13 from its overflow IRQ. The LED and grid cell follow live — the toggle is the verdict.</p>
       <div class="row">
@@ -272,6 +285,15 @@
       <div id="hid-verdict" class="term small"></div>
     </div>
 
+    <div class="tabpane" id="pane-wdt">
+      <p class="desc">Watchdog on the real ArduinoCore <span class="mono">WDT</span> library: one sketch refreshes every 10&nbsp;ms forever (no reset may latch), the other starts the watchdog and never refreshes (reset must latch). The model flag below is the verdict.</p>
+      <div class="row">
+        <button id="btn-wdt-run" class="btn-acc">Run WDT demo</button>
+      </div>
+      <ol id="wdt-steps" class="enum"></ol>
+      <div id="wdt-verdict" class="term small"></div>
+    </div>
+
     <div class="tabpane" id="pane-matrix">
       <p class="desc">12&times;8 LED matrix, charlieplexed on real GPIO (the same 11 pins as hardware): the sketch multiplexes a smiley faster than the eye. The grid below accumulates lit LEDs with persistence — like vision does. No panel on Minima; the pattern is the verdict.</p>
       <div class="row">
@@ -292,11 +314,11 @@
     </div>
 
     <div class="tabpane" id="pane-docs">
-      <p class="desc">What this emulator covers: every row is a feature of the Arduino UNO R4 Minima variant (RA4M1), whether the silicon has it, what the emulator does with it, and how it is proven. Full proofs live in the repo (<span class="mono">cargo test</span>, 206 + 79 green).</p>
+      <p class="desc">What this emulator covers: every row is a feature of the Arduino UNO R4 Minima variant (RA4M1), whether the silicon has it, what the emulator does with it, and how it is proven. Full proofs live in the repo (<span class="mono">cargo test</span>, 117 + 80 green).</p>
       <div class="doctable-wrap"><table class="doctable">
         <thead><tr><th>Feature</th><th>Minima HW</th><th>Status</th><th>Proof / note</th></tr></thead>
         <tbody>
-        <tr><td>Cortex-M4F CPU</td><td>yes</td><td class="st-done">Done</td><td>128 legacy decoder tests</td></tr>
+        <tr><td>Cortex-M4F CPU</td><td>yes</td><td class="st-done">Done</td><td>37 legacy CPU/system tests</td></tr>
         <tr><td>NVIC / SysTick / SCB / MPU / FPU</td><td>yes</td><td class="st-done">Done</td><td>reused ARM models; VTOR keeps bits[31:7]</td></tr>
         <tr><td>SYSTEM / MSTP / ICU / ELC</td><td>yes</td><td class="st-done">Done</td><td>IELSR routing incl. DTCE; pin-edge injection</td></tr>
         <tr><td>PORT + PFS GPIO</td><td>yes</td><td class="st-done">Done</td><td>real PCNTR layout; live grid on this page</td></tr>
@@ -311,24 +333,25 @@
         <tr><td>GPT0-13</td><td>yes</td><td class="st-done">Done</td><td>real offsets; wrap/compare/overflow events</td></tr>
         <tr><td>GPT PWM output</td><td>yes (D3/D5/D6/D9/D10/D11)</td><td class="st-done">Done</td><td>GTIO function 0 via PFS; 25% duty on D6; PWM tab</td></tr>
         <tr><td>AGT0-5</td><td>yes</td><td class="st-done">Done</td><td>1 ms IRQs drive millis() in Blink</td></tr>
-        <tr><td>ADC14 / DAC12 / RTC+alarm</td><td>yes</td><td class="st-done">Done</td><td>convert, retained output, BCD rollover + event 38</td></tr>
-        <tr><td>DMAC memcopy / DTC repeat</td><td>yes</td><td class="st-done">Done</td><td>sync path; GPT-&gt;DAC firmware proof</td></tr>
-        <tr><td>WDT / IWDT</td><td>yes</td><td class="st-done">Done</td><td>refresh-holds + expiry-latches proofs</td></tr>
+        <tr><td>ADC14 / DAC12 / RTC+alarm</td><td>yes</td><td class="st-done">Done</td><td>convert, retained output, BCD rollover + event 38; RTC tab</td></tr>
+        <tr><td>DMAC memcopy / DTC repeat</td><td>yes</td><td class="st-done">Done</td><td>sync path; GPT-&gt;DAC proof + AnalogWave sine tab</td></tr>
+        <tr><td>WDT / IWDT</td><td>yes</td><td class="st-done">Done</td><td>refresh-holds + expiry-latches proofs; WDT tab</td></tr>
         <tr><td>CRC / DOC / OPAMP / ACMP</td><td>yes</td><td class="st-done">Done</td><td>IEEE-802.3, follower + compare</td></tr>
         <tr><td>USBFS CDC serial</td><td>yes (native USB)</td><td class="st-done">Done</td><td>enumerate / hello / echo; Serial + Echo tabs</td></tr>
-        <tr><td>USB HID keyboard</td><td>yes</td><td class="st-done">Done</td><td>report descriptor + INT-IN report proof</td></tr>
-        <tr><td>USB suspend / resume</td><td>yes</td><td class="st-done">Done</td><td>DVSQ SUSPx, RESM, weak-callback proof</td></tr>
-        <tr><td>CTSU self + mutual touch</td><td>yes</td><td class="st-done">Done</td><td>counters + END event</td></tr>
-        <tr><td>CAN0 mailbox + FIFO + errors</td><td>yes (CAN1: no events)</td><td class="st-done">Done</td><td>loopback, MB24 FIFO, isError proof; CAN tab</td></tr>
+        <tr><td>USB HID keyboard</td><td>yes</td><td class="st-done">Done</td><td>report descriptor + INT-IN report proof; HID tab</td></tr>
+        <tr><td>USB suspend / resume</td><td>yes</td><td class="st-done">Done</td><td>DVSQ SUSPx, RESM, weak-callback proof; Serial tab tail</td></tr>
+        <tr><td>CTSU self + mutual touch</td><td>yes</td><td class="st-done">Done</td><td>counters + END event; CTSU tab</td></tr>
+        <tr><td>CAN0 mailbox + FIFO + errors</td><td>yes (CAN1: no events)</td><td class="st-done">Done</td><td>loopback, MB24 FIFO, isError proof; CAN + CAN err tabs</td></tr>
         <tr><td>analogWrite (GPT0 PWM API)</td><td>yes (D6 = GTIOCB)</td><td class="st-done">Done</td><td>GTCCRD buffer + GTBER transfer; analogWrite tab</td></tr>
+        <tr><td>AnalogWave sine (GPT→DTC→DAC)</td><td>yes</td><td class="st-done">Done</td><td>analogWave.sine(10), 24 samples into DADR; AnalogWave tab</td></tr>
         <tr><td>tone() (GPT PERIODIC IRQ)</td><td>yes</td><td class="st-done">Done</td><td>440 Hz toggle on D13; tone tab</td></tr>
         <tr><td>SoftwareSerial 9600 loopback</td><td>lib (GPIO+GPT+DMAC)</td><td class="st-done">Done</td><td>0xA5 TX→RX via soft wire; SoftSerial tab</td></tr>
-        <tr><td>CAN1 mailbox</td><td>yes (no ELC events)</td><td class="st-done">Done</td><td>polled self-test loopback proof</td></tr>
-        <tr><td>DAC8 8-bit</td><td>yes (no Arduino API)</td><td class="st-done">Done</td><td>retain + DAM gate proof</td></tr>
+        <tr><td>CAN1 mailbox</td><td>yes (no ELC events)</td><td class="st-done">Done</td><td>polled self-test loopback proof; misc tab</td></tr>
+        <tr><td>DAC8 8-bit</td><td>yes (no Arduino API)</td><td class="st-done">Done</td><td>retain + DAM gate proof; misc tab</td></tr>
         <tr><td>TSN calibration</td><td>yes</td><td class="st-done">Done</td><td>fixed trim constants proof</td></tr>
         <tr><td>SLCDC segment LCD</td><td>yes (no panel)</td><td class="st-done">Done</td><td>regs + 64B display RAM proof</td></tr>
-        <tr><td>KINT key interrupt</td><td>yes</td><td class="st-done">Done</td><td>key-press jig into event 69 + proof</td></tr>
-        <tr><td>SSI0 audio FIFO</td><td>yes (I2S lib broken)</td><td class="st-done">Done</td><td>TX drain + RX pattern proof</td></tr>
+        <tr><td>KINT key interrupt</td><td>yes</td><td class="st-done">Done</td><td>key-press jig into event 69 + proof; misc tab</td></tr>
+        <tr><td>SSI0 audio FIFO</td><td>yes (I2S lib broken)</td><td class="st-done">Done</td><td>TX drain + RX pattern proof; misc tab</td></tr>
         <tr><td>SSI1 audio FIFO</td><td>yes (FSP mask = SSI0 only)</td><td class="st-done">Done</td><td>same model, own slot/FIFOs; register proof</td></tr>
         <tr><td>GPT OPS / POEG0-3 / R_DMA</td><td>stubs (no Arduino consumer)</td><td class="st-done">Done</td><td>accept-and-retain; register proof</td></tr>
         <tr><td>LED matrix 12x8</td><td>GPIO-driven</td><td class="st-done">Done</td><td>charlieplex render; smiley proof + Matrix tab</td></tr>
@@ -353,7 +376,7 @@
 </main>
 
 <footer>
-  <span>RA4M1 peripheral models proven against arduino-cli firmware (206 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (117 + 80 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
 </footer>
 
 <script type="module" src="app.js"></script>
