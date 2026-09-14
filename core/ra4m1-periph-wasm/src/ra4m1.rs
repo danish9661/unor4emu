@@ -2865,9 +2865,16 @@ mod tests {
 
     #[test]
     fn ra4m1_ite_add_imm_preserves_flags() {
-        // Exact printNumber core for digit 4 (r3 starts 0 here instead of
-        // the uxtb'd remainder, so correct is 0+48 = 48, not 52).
-        // Both-arms bug gave 0+48+55 = 103.
+        // CPU: predicated 16-bit flag-setting preserves flags
+        // (printNumber's exact core for digit 4: r3 starts 0 here instead
+        // of the uxtb'd remainder, so correct is 0+48 = 48, not 52).
+        // Both-arms bug gave 0+48+55 = 103. ARM ARM: 16-bit insns in an
+        // IT block, other than CMP/CMN/TST, do NOT set flags. GAS vectors
+        // in core/docs/it12.s (assemble with the F4 toolchain flags in
+        // core/docs/README.md): A ite-le imm3 (writeback happens, flags
+        // untouched), B itt-mi skipped (regs + flags unchanged), C cmpeq
+        // SETS flags / addne preserves, D shifts preserve, E AND/ORR
+        // preserve, F tsteq SETS flags.
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
@@ -2937,6 +2944,97 @@ mod tests {
         assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
         assert_eq!(cpu.regs.r[0], 0);
         assert_eq!((cpu.regs.xpsr >> 30) & 1, 1, "Z preserved through MOV-reg");
+        // Vectors B-F from core/docs/it12.s (same GAS halfwords the F4
+        // it_block_16bit_preserves_flags proof uses): writebacks happen,
+        // predicated writeback slots preserve flags, CMP/TST set them.
+        // Vector B: itt mi, both skipped (MI false): regs + flags frozen.
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        let sys = crate::sys();
+        run_h16(&mut mem, &mut cpu, sys, &[0xBF44, 0x1840, 0x3207],
+            &[(0, 10), (1, 20), (2, 30)], 0x00000000);
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(cpu.regs.r[0], 10);
+        assert_eq!(cpu.regs.r[2], 30);
+        assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x00000000);
+        // Vector C: ite eq, EQ true: cmpeq SETS flags (Z clears on 5-1),
+        // then the live-NE addne slot still preserves (r1=102, flags kept).
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        let sys = crate::sys();
+        run_h16(&mut mem, &mut cpu, sys, &[0xBF0C, 0x2801, 0x3102],
+            &[(0, 5), (1, 100)], 0x40000000); // Z=1
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!((cpu.regs.xpsr >> 30) & 1, 0, "cmpeq in IT must set flags (Z cleared)");
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        let sys = crate::sys();
+        run_h16(&mut mem, &mut cpu, sys, &[0xBF0C, 0x2801, 0x3102],
+            &[(0, 5), (1, 100)], 0x80000000); // N=1,Z=0
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(cpu.regs.r[1], 102, "addne writeback still happens in IT");
+        assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x80000000, "addne in IT must not touch flags");
+        // Vector D: itt pl shifts preserve (writebacks happen, flags stay 0).
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        let sys = crate::sys();
+        run_h16(&mut mem, &mut cpu, sys, &[0xBF5C, 0x0040, 0x0849],
+            &[(0, 0x40000000), (1, 1)], 0x00000000);
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(cpu.regs.r[0], 0x80000000, "lslpl writeback still happens in IT");
+        assert_eq!(cpu.regs.r[1], 0, "lsrpl writeback still happens in IT");
+        assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x00000000, "shifts must not touch flags in IT");
+        // Vector E: itt pl AND/ORR preserve (writebacks happen, flags stay 0).
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        let sys = crate::sys();
+        run_h16(&mut mem, &mut cpu, sys, &[0xBF5C, 0x4008, 0x431A],
+            &[(0, 0xFF00FF00), (1, 0x00FF0000), (2, 0x80000000), (3, 0)], 0x00000000);
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(cpu.regs.r[0], 0x00000000, "andpl writeback still happens in IT");
+        assert_eq!(cpu.regs.r[2], 0x80000000, "orrpl writeback still happens in IT");
+        assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x00000000, "ALU-reg must not touch flags in IT");
+        // Vector F: ite eq, EQ true: tsteq SETS flags (Z clears on
+        // 0xFF&0x0F), then live-NE movne still writes (r2=0, flags kept).
+        let mut cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        let sys = crate::sys();
+        run_h16(&mut mem, &mut cpu, sys, &[0xBF0C, 0x4208, 0x2200],
+            &[(0, 0xFF), (1, 0x0F), (2, 99)], 0x40000000); // Z=1
+        assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+        assert_eq!(cpu.regs.r[2], 0, "movne on live-NE must still write in IT");
+        assert_eq!(cpu.regs.xpsr & 0xF0000000, 0x00000000, "tsteq in IT must set flags (Z cleared)");
+    }
+
+    /// Load `words` at the IT-vector scratch page and run them from a
+    /// fresh Thumb PC (shared by the it12.s vectors above). Seeds regs
+    /// AFTER construction (Cpu::new == reset, which clears IT state).
+    fn run_h16(
+        mem: &mut crate::cpu::mem::FlatMemory,
+        cpu: &mut Cpu,
+        sys: &crate::system::WasmSystem,
+        words: &[u16],
+        seed: &[(usize, u32)],
+        xpsr: u32,
+    ) {
+        let mut img = vec![0u8; 0x200];
+        img[0..4].copy_from_slice(&0x20008000u32.to_le_bytes());
+        img[4..8].copy_from_slice(&0x00000101u32.to_le_bytes());
+        for (i, w) in words.iter().enumerate() {
+            img[0x100 + i * 2] = (w & 0xFF) as u8;
+            img[0x100 + i * 2 + 1] = (w >> 8) as u8;
+        }
+        // Trailing `b .` so overrun faults loudly instead of sliding.
+        img[0x100 + words.len() * 2] = 0xFE;
+        img[0x100 + words.len() * 2 + 1] = 0xE7;
+        mem.load(&img, FLASH_BASE);
+        *cpu = Cpu::new(0x20008000, 0x00000101);
+        cpu.deliver_irqs = false;
+        for &(r, v) in seed {
+            cpu.regs.r[r] = v;
+        }
+        cpu.regs.xpsr = xpsr;
+        cpu.run(sys, mem, words.len() as u32 + 1);
     }
 
     #[test]

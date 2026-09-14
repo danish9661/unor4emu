@@ -785,11 +785,10 @@ $('btn-signal-run').addEventListener('click', async () => {
   // (same channel the Rust ADC proof uses: ch2 -> ADDR2).
   adc_set_channel_value(2, 0xABC);
   // ADC convert first (ADANSA0 ch2 + ADST, result at ADDR2 = base+0x24),
-  // like ra4m1_map_adc_converts_channel — the perChunk closure below
-  // then only polls the already-converted result (no const hoist bug).
-  // NOTE: the ADC model is a separate unit from the OPAMP firmware boot:
-  // boot() resets the whole system, so program ADANSA+ADST *after* the
-  // boot inside runFw — do the convert in the first perChunk tick.
+  // like ra4m1_map_adc_converts_channel. NOTE: the ADC model is a
+  // separate unit from the OPAMP firmware boot: boot() resets the whole
+  // system, so program ADANSA+ADST *after* the boot inside runFw — do
+  // the convert in the first perChunk tick.
   let adcDone = false;
   const ok = await runFw('r4opamp.bin', null, 3000, () => {
     if ((periphRead(OPAMP + 0x0C, 1) & 1) !== 0) st.mark(0);

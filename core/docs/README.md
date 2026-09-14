@@ -52,3 +52,4 @@ Key derivations are written up in AGENTS.md §25 (encoding rules + gotchas).
 | `ldrd2.s` | LDRD/STRD order: `ldrd r2,r3,[r3,#8]`=E9D3 2302, `ldrd r0,r1,[r4,#104]`=E9D4 011A, `strd r8,r9,[r4,#96]`=E9C4 8918 → Rt=op2[15:12] is FIRST |
 | `ldrd3.s` | LDRD/STRD order, zero-offset forms: `ldrd r0,r1,[r2]`=E9D2 0100, `ldrd r4,r5,[r6]`=E9D6 4500, `strd r8,r9,[r4]`=E9C4 8900 → same Rt-first rule, unambiguous |
 | `strd2.s` | STRD order incl. crossed regs: `strd r2,r0,[r4,#68]`=E9C4 2011 ([15:12]=2 first), plus repeats of the strd2/ldrd2 forms |
+| `it12.s` | Predicated 16-bit flag rule (cpu_bug §12, ARM ARM: IT-block 16-bit insns other than CMP/CMN/TST do not set flags): A `ite le/addle/addgt`=BFD4 3330 3337, B `itt mi/addmi/addmi`=BF44 1840 3207, C `ite eq/cmpeq/addne`=BF0C 2801 3102, D `itt pl/lslpl/lsrpl`=BF5C 0040 0849, E `itt pl/andpl/orrpl`=BF5C 4008 431A, F `ite eq/tsteq/movne`=BF0C 4208 2200 |

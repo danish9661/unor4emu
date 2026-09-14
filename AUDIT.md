@@ -11,7 +11,7 @@ Playwright screenshots with a clean console.
 ## Verdict
 
 No — not everything is implemented. But nothing known is broken: both
-suites are green (118 + 81, single-threaded), the demo runs 24 tabs live, and every gap below is enumerated with its
+suites are green (118 + 81, single-threaded), the demo runs 25 tabs live, and every gap below is enumerated with its
 Arduino relevance. The pattern is consistent: everything the Arduino
 core drives on real Minima sketches is modeled and proven; the missing
 pieces are either unused by Arduino or parked platform work (WiFi).

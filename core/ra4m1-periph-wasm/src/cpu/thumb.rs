@@ -822,6 +822,7 @@ fn nz(c: &mut Cpu, v: u32) {
         | if v == 0 { 0x40000000 } else { 0 }
         | if v & 0x80000000 != 0 { 0x80000000 } else { 0 };
 }
+#[inline]
 fn add_flags(c: &mut Cpu, a: u32, b: u32, ci: u32) -> u32 {
     let r = a.wrapping_add(b).wrapping_add(ci);
     let carry = (a as u64) + (b as u64) + (ci as u64) > 0xFFFF_FFFF;
@@ -833,6 +834,7 @@ fn add_flags(c: &mut Cpu, a: u32, b: u32, ci: u32) -> u32 {
         | if over { 0x10000000 } else { 0 };
     r
 }
+#[inline]
 fn sub_flags(c: &mut Cpu, a: u32, b: u32, ci: u32) -> u32 {
     // ci here is "carry in" (1 = no borrow). NOT carry = borrow.
     let r = a.wrapping_sub(b).wrapping_sub(1 - ci);
@@ -1119,6 +1121,9 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
     }
     if o & 0xF800 == 0x2800 {
         let rn = ((o >> 8) & 7) as usize;
+        // CMP-imm8 is a TEST op (no writeback): flags are its only
+        // output, so it ALWAYS sets flags, even predicated — same rule
+        // as TST/CMP/CMN in the 0x4000 ALU block (it12.s vector C).
         sub_flags(cpu, rr(cpu, rn, pc), o & 0xFF, 1);
         adv(cpu, pc, 2);
         return true;
@@ -1225,9 +1230,7 @@ pub fn exec16(cpu: &mut Cpu, sys: &WasmSystem, mem: &mut dyn Memory, op: u16, pc
                 }
             }
             8 => {
-                if !pred {
-                    sub_flags(cpu, a, b, 1);
-                }
+                nz(cpu, a & b);
             }
             9 => {
                 // RSB (negate): Rd = 0 - Rs, with flags (implicit-S T1:

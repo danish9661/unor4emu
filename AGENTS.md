@@ -207,7 +207,7 @@ wasm wrappers can path-depend on it).
   P105 RX IRQ0 via GPT4/GPT5 timers + DMAC0/DMAC1 PCNTR samples + ELC
   GPT_A link + soft_wire jig) are all proven end-to-end on real Arduino
   API with `r4aw`/`r4tone`/`r4sser` bins + `core/blinky/sketches/` sources
-  + demo tabs (24 tabs total).
+  + demo tabs (25 tabs total).
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
 
@@ -294,7 +294,7 @@ r4sser sources).
 `./demo/build.sh` then `python3 -m http.server -d demo 8901`: three-page
 site (`index.html` demo + `docs.html` + `about.html`) driving the 288KB Minima
 WASM (`WasmCpu` + the `usb_*` / `periph_*` free functions + `spi_set_sd_card`/
-`sd_read_block` for the SD tab). Twenty-four tabs run the vendored firmware
+`sd_read_block` for the SD tab). Twenty-five tabs run the vendored firmware
 live: Blink (LED + full
 12x16 GPIO grid from PORT, plus a MIPS meter in the stats), Serial (in-page virtual-host enumeration
 with step checklist, hello in the terminal, suspend/resume tail), Echo (bulk-pipe discovery
