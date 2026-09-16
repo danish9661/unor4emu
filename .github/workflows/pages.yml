@@ -53,7 +53,7 @@ jobs:
           test -f demo/about.html
           test -f demo/pkg/uno_r4_minima_wasm_bg.wasm
           test -f demo/pkg/uno_r4_minima_wasm.js
-          for f in r4blink.bin r4serial.bin r4echo.bin r4wire.bin r4wire1.bin r4spi.bin r4spislv.bin r4sd.bin r4canfifo.bin r4eep.bin r4pwm.bin r4rtc.bin r4ctsu.bin r4hid.bin r4aw.bin r4tone.bin r4sser.bin r4aws.bin r4rtcalm.bin r4canbo.bin r4can1.bin r4dac8.bin r4kint.bin r4ssi.bin r4matrix.bin r4wdtref.bin r4wdtexp.bin r4opamp.bin r4irq.bin r4serial1.bin r4can.bin r4canerr.bin r4dtc.bin r4susp.bin; do
+          for f in r4blink.bin r4serial.bin r4echo.bin r4wire.bin r4wire1.bin r4spi.bin r4spislv.bin r4sd.bin r4canfifo.bin r4eep.bin r4pwm.bin r4rtc.bin r4ctsu.bin r4hid.bin r4aw.bin r4tone.bin r4sser.bin r4aws.bin r4rtcalm.bin r4canbo.bin r4can1.bin r4dac8.bin r4kint.bin r4ssi.bin r4matrix.bin r4wdtref.bin r4wdtexp.bin r4opamp.bin r4irq.bin r4serial1.bin r4can.bin r4canerr.bin r4dtc.bin r4susp.bin r4analog.bin r4mtx.bin; do
             test -f demo/fw/$f || (echo "missing demo/fw/$f" && exit 1)
           done
           ls -la demo/pkg demo/fw

@@ -6,7 +6,7 @@ import init, {
   spi_set_sd_card, sd_read_block,
   soft_wire, peek_uart_output, uart_rx_byte,
   icu_pin_edge, kint_key_press, can_inject_errors, spi_set_loopback,
-  adc_set_channel_value, adc_clear_channel_value,
+  adc_set_channel_value, adc_clear_channel_value, matrix_trace_take,
   usb_host_suspend, usb_host_resume, is_watchdog_reset_requested,
 } from './pkg/uno_r4_minima_wasm.js';
 
@@ -147,7 +147,9 @@ function refreshBoard(txFlash, rxFlash) {
   if (!board) return;
   let led = false;
   for (let p = 0; p < 12; p++) {
-    const v = periphRead(PORT_BASE + p * 0x20, 4) & 0xFFFF;
+    // PCNTR1 word: PDR low half, PODR high half (settled layout).
+    // The grid shows live output LEVELS (PODR).
+    const v = (periphRead(PORT_BASE + p * 0x20, 4) >>> 16) & 0xFFFF;
     if (v !== lastPorts[p]) {
       const diff = v ^ lastPorts[p];
       for (let b = 0; b < 16; b++) {
@@ -164,9 +166,10 @@ function refreshBoard(txFlash, rxFlash) {
     if (v) led = true;
   }
   // Board LED: Minima/WiFi D13 = P111 (PORT1 bit 11); EK-RA4M1 LED1 =
-  // P106 (PORT1 bit 6, EK manual s5.4.4). Fall back to any-output glow
+  // P106 (PORT1 bit 6, EK manual s5.4.4). PODR levels live in the HIGH
+  // half of the PCNTR1 word (PDR low). Fall back to any-output glow
   // (e.g. TX/RX activity elsewhere).
-  const p1 = periphRead(PORT_BASE + 1 * 0x20, 4);
+  const p1 = periphRead(PORT_BASE + 1 * 0x20, 4) >>> 16;
   const Fuji = target === 'ek' ? (p1 >> 6) & 1 : (p1 >> 11) & 1;
   setLed('led-main', 'led-glow', Fuji || led);
   if (txFlash) flash('led-tx');
@@ -484,12 +487,16 @@ let target = 'minima'; // minima | wifi (parked) | ek (P106 LED1, zero-boot)
 // WiFi shares Minima's D13 = P111 LED. EK-RA4M1 LED1 = P106.
 const ledOn = () => {
   const bit = target === 'ek' ? 6 : 11;
-  return ((periphRead(PORT_BASE + 1 * 0x20, 4) >> bit) & 1) !== 0;
+  return ((periphRead(PORT_BASE + 1 * 0x20, 4) >>> 16 >> bit) & 1) !== 0;
 };
 // Boot fw, then pump `chunks` 48k-chunks (proof-harness cadence),
 // calling perChunk() after every chunk for transient flags.
 // Board/DOM refresh is batched: refreshBoard walks 192 cells, so only
 // pay for it every 8th chunk; yield via rAF only when a paint is due.
+// PCNTR1 word layout (settled): PDR low half, PODR high half — level
+// readers use (w >>> 16), direction readers (w & 0xFFFF).
+const podLev = (w) => (w >>> 16) & 0xFFFF;
+const pdrDir = (w) => w & 0xFFFF;
 async function runFw(fwName, arm, chunks, perChunk) {
   blinkMode = false;
   const fw = await fetch('fw/' + fwName).then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
@@ -665,7 +672,7 @@ $('btn-pwm-run').addEventListener('click', async () => {
     if ((periphRead(GPT0 + 0x2C, 4) & 1) !== 0) st.mark(0);
     if (((periphRead(DF_P106, 4) >>> 24) & 0x1F) === 0x03) st.mark(1);
     n++;
-    if ((periphRead(PORT_BASE + 0x20, 4) & (1 << 6)) !== 0) hi++;
+    if ((periphRead(PORT_BASE + 0x20, 4) >>> 16 & (1 << 6)) !== 0) hi++;
     if (n >= 40) {
       const duty = hi / n;
       if (hi > 0 && hi < n) st.mark(2);
@@ -953,7 +960,7 @@ $('btn-engine-run').addEventListener('click', async () => {
     await engBoot('r4canerr.bin');
     for (let i = 0; i < 200 && running; i++) { if (!pump(CHUNK)) break; }
     {
-      const snap = () => { const s = []; for (let p = 0; p < 12; p++) s.push(periphRead(PORT_BASE + p * 0x20, 4) & 0xFFFF); return s.join(','); };
+      const snap = () => { const s = []; for (let p = 0; p < 12; p++) s.push((periphRead(PORT_BASE + p * 0x20, 4) >>> 16) & 0xFFFF); return s.join(','); };
       const first = snap();
       can_inject_errors(0, 100);
       let on = false;
@@ -1455,6 +1462,20 @@ function bootAt(fwBytes, base) {
 /* ---------------- matrix (12x8 charlieplexed GPIO) ---------------- */
 const MP = [[0,3],[0,4],[0,11],[0,12],[0,13],[0,15],[2,4],[2,5],[2,6],[2,12],[2,13]];
 const SMILE = [0x3C,0x42,0xA5,0x81,0xA5,0x99,0xA5,0x81,0xA5,0x42,0x3C,0x00];
+// Arduino_LED_Matrix finger pairs (96 LEDs, header pins[][2] order) +
+// bit-reversed LEDMATRIX_HEART_BIG words (the ISR's reverse()).
+// HEART[w] bit b = LED index 32*w+b (index space, not x/y pixels).
+const PINS = [[7,3],[3,7],[7,4],[4,7],[3,4],[4,3],[7,8],[8,7],[3,8],[8,3],
+  [4,8],[8,4],[7,0],[0,7],[3,0],[0,3],[4,0],[0,4],[8,0],[0,8],
+  [7,6],[6,7],[3,6],[6,3],[4,6],[6,4],[8,6],[6,8],[0,6],[6,0],
+  [7,5],[5,7],[3,5],[5,3],[4,5],[5,4],[8,5],[5,8],[0,5],[5,0],
+  [6,5],[5,6],[7,1],[1,7],[3,1],[1,3],[4,1],[1,4],[8,1],[1,8],
+  [0,1],[1,0],[6,1],[1,6],[5,1],[1,5],[7,2],[2,7],[3,2],[2,3],
+  [4,2],[2,4],[8,2],[2,8],[0,2],[2,0],[6,2],[2,6],[5,2],[2,5],
+  [1,2],[2,1],[7,10],[10,7],[3,10],[10,3],[4,10],[10,4],[8,10],
+  [10,8],[0,10],[10,0],[6,10],[10,6],[5,10],[10,5],[1,10],[10,1],
+  [2,10],[10,2],[7,9],[9,7],[3,9],[9,3],[4,9],[9,4]];
+const HEART = [0x2225218C, 0x81042022, 0x02005008];
 const mxCells = [];
 function buildMatrix() {
   const g = $('matrix-grid');
@@ -1466,15 +1487,41 @@ function buildMatrix() {
 }
 buildMatrix();
 const mxLast = new Array(96).fill(-1e9);
+// Settled PCNTR1 layout: PDR low half, PODR high half. anode-HIGH =
+// output+level, cathode-LOW = output+~level. The bare-metal smiley
+// sketch drives levels directly (long dwell); the Arduino-lib heart
+// uses adjacent on/off pairs (short windows) and is decoded from the
+// GPIO trace instead (see mxDecodeTrace).
 function mxSample(nowMs) {
   const p0 = periphRead(PORT_BASE, 4), p2 = periphRead(PORT_BASE + 2 * 0x20, 4);
-  const isOutHi = (p, b) => (((p >>> 16) >> b) & 1) !== 0 && (((p & 0xFFFF) >> b) & 1) !== 0;
-  const isOutLo = (p, b) => (((p >>> 16) >> b) & 1) !== 0 && (((p & 0xFFFF) >> b) & 1) === 0;
+  // Direction-gated (settled layout: PDR low, PODR high): stale levels
+  // on tristated rails must not decode.
+  const isOutHi = (p, b) => (((p & 0xFFFF) >> b) & 1) !== 0 && (((p >>> 16) >> b) & 1) !== 0;
+  const isOutLo = (p, b) => (((p & 0xFFFF) >> b) & 1) !== 0 && (((p >>> 16) >> b) & 1) === 0;
   const hi = (port, bit) => isOutHi(port === 0 ? p0 : p2, bit);
   const lo = (port, bit) => isOutLo(port === 0 ? p0 : p2, bit);
   for (let k = 0; k < 96; k++) {
     const a = Math.floor(k / 9), t = k % 9, c = t + (t >= a ? 1 : 0);
     if (hi(MP[a][0], MP[a][1]) && lo(MP[c][0], MP[c][1])) mxLast[k] = nowMs;
+  }
+}
+// Trace decode for the Arduino-lib heart: same pair logic over
+// matrix-trace snapshots (word layout PDR low / PODR high).
+function mxDecodeTrace() {
+  const F = MP;
+  const words = matrix_trace_take();
+  const nowMs = steps / 48000;
+  for (let s = 0; s + 12 <= words.length; s += 12) {
+    const p0 = words[s], p2 = words[s + 2];
+    const pv = (port) => port === 0 ? p0 : p2;
+    for (let k = 0; k < 96; k++) {
+      const af = PINS[k][0], cf = PINS[k][1];
+      const a = pv(F[af][0]), ab = F[af][1];
+      const c = pv(F[cf][0]), cb = F[cf][1];
+      const ahi = (((a & 0xFFFF) >> ab) & 1) !== 0 && (((a >>> 16) >> ab) & 1) !== 0;
+      const clo = (((c & 0xFFFF) >> cb) & 1) !== 0 && (((c >>> 16) >> cb) & 1) === 0;
+      if (ahi && clo) mxLast[k] = nowMs;
+    }
   }
 }
 function mxRender(nowMs) {
@@ -1522,6 +1569,98 @@ $('btn-matrix-run').addEventListener('click', async () => {
     ? [[`smiley complete: ${seen.size} LEDs reconstructed from GPIO`, 'okline']]
     : [['pattern did not stabilize (see console).', '']]);
   if (!ok || !done) banner('Matrix demo did not complete.', 'err');
+});
+
+/* ---------------- matrix heart (Arduino_LED_Matrix lib) ---------------- */
+$('btn-mtx-run').addEventListener('click', async () => {
+  const st = mkSteps($('matrix-steps'), [
+    'heart frame driven (trace states decoded)',
+    'all 20 heart LEDs seen, no extras',
+    'reconstruction matches HEART bitmap',
+  ]);
+  sayVerdict($('matrix-verdict'), [['booting Arduino heart sketch (WiFi fqbn, same silicon)…', 'sys']]);
+  mxLast.fill(-1e9); mxRender(0);
+  matrix_trace_take(); // drop boot-time g_pin_cfg states
+  const seen = new Set();
+  let done = false;
+  const ok = await runFw('r4mtx.bin', null, 1200, () => {
+    mxDecodeTrace();
+    const nowMs = steps / 48000;
+    mxRender(nowMs);
+    for (let k = 0; k < 96; k++) if (nowMs - mxLast[k] < 150) seen.add(k);
+    if (seen.size > 4) st.mark(0);
+    let extra = false;
+    for (const k of seen) {
+      const want = ((HEART[Math.floor(k / 32)] >>> (k % 32)) & 1) !== 0;
+      if (!want) { extra = true; break; }
+    }
+    if (!extra && seen.size >= 20) st.mark(1);
+    if (!extra) {
+      let all = true;
+      for (let k = 0; k < 96; k++) {
+        const want = ((HEART[Math.floor(k / 32)] >>> (k % 32)) & 1) !== 0;
+        if (want && !seen.has(k)) { all = false; break; }
+      }
+      if (all) { st.mark(2); done = true; }
+    }
+  });
+  running = false; setState('paused');
+  sayVerdict($('matrix-verdict'), ok && done
+    ? [[`heart complete: ${seen.size} LEDs reconstructed from the GPIO trace`, 'okline']]
+    : [['heart did not stabilize (see console).', '']]);
+  if (!ok || !done) banner('Matrix heart demo did not complete.', 'err');
+});
+
+/* ---------------- analog (Arduino ADC + DAC) ---------------- */
+$('btn-analog-run').addEventListener('click', async () => {
+  const ADC = 0x4005C000, DAC = 0x4005E000;
+  const slider = $('analog-in');
+  const v0 = parseInt(slider.value, 10) || 2048;
+  const st = mkSteps($('analog-steps'), [
+    `ADC ch9 converts slider value (${v0})`,
+    'DAC12 follows (v >> 2, 12-bit)',
+    'LED follows threshold (v > 100)',
+  ]);
+  sayVerdict($('analog-verdict'), [[`booting analogRead(A0) → analogWrite(DAC) sketch…`, 'sys']]);
+  let done = false, lastV = -1;
+  const show = (v) => {
+    const addr = periphRead(ADC + 0x20 + 9 * 2, 4) & 0x3FFF;
+    const dadr = periphRead(DAC, 4) & 0xFFF;
+    const led = ((periphRead(PORT_BASE + 0x20, 4) >>> 16 >> 11) & 1) !== 0;
+    sayVerdict($('analog-verdict'), [
+      [`ADDR9=${addr} (want ${v})  DADR0=${dadr} (want ${(v >> 2) & 0xFFF})  LED ${led ? 'on' : 'off'} (want ${v > 100 ? 'on' : 'off'})`, (addr === v && dadr === ((v >> 2) & 0xFFF) && led === (v > 100)) ? 'okline' : 'sys'],
+    ]);
+    return addr === v && dadr === ((v >> 2) & 0xFFF) && led === (v > 100);
+  };
+  const arm = () => adc_set_channel_value(9, v0);
+  const ok = await runFw('r4analog.bin', arm, 3000, () => {
+    const v = parseInt(slider.value, 10) || 0;
+    adc_set_channel_value(9, v); // live re-drive, no reboot needed
+    if (v !== lastV) {
+      lastV = v;
+      st.mark(0);
+      sayVerdict($('analog-verdict'), [[`slider=${v} …settling`, 'sys']]);
+    }
+    const addr = periphRead(ADC + 0x20 + 9 * 2, 4) & 0x3FFF;
+    if (addr === (v & 0x3FFF)) {
+      const dadr = periphRead(DAC, 4) & 0xFFF;
+      if (dadr === ((v >> 2) & 0xFFF)) st.mark(1);
+      const led = ((periphRead(PORT_BASE + 0x20, 4) >>> 16 >> 11) & 1) !== 0;
+      if (led === (v > 100)) st.mark(2);
+      if (show(v)) done = true;
+    }
+    refreshBoard(false, false);
+  });
+  running = false; setState('paused');
+  adc_clear_channel_value(9);
+  if (!(ok && done)) {
+    sayVerdict($('analog-verdict'), [['no settled verdict (see console).', '']]);
+    banner('Analog demo did not complete.', 'err');
+  }
+});
+$('analog-in').addEventListener('input', (e) => {
+  $('analog-v').textContent = e.target.value;
+  try { adc_set_channel_value(9, parseInt(e.target.value, 10) || 0); } catch (_) {}
 });
 
 /* ---------------- mips meter ---------------- */

@@ -171,6 +171,17 @@ pub fn kint_key_press(key: u8) -> bool {
     system::kint_key_press(sys(), key as usize)
 }
 
+/// Drain the LED-matrix GPIO trace (one 12-port snapshot per PORT/PFS
+/// write, oldest first). Used by the Matrix demo to reconstruct the
+/// charlieplex frame without sampling luck.
+#[wasm_bindgen]
+pub fn matrix_trace_take() -> Vec<u32> {
+    crate::peripherals::ra_port::matrix_trace_take()
+        .into_iter()
+        .flat_map(|s| s.into_iter())
+        .collect()
+}
+
 /// Test-jig CAN error injection: stuff `rx` receive / `tx` transmit
 /// errors into CAN0's counters (EWF/EPF/BOEF + ERI event per EIER).
 #[wasm_bindgen]

@@ -778,6 +778,7 @@ pub fn reset_globals() {
     if let Some(m) = SCI_SPI_LOOPBACK.get() { m.lock().unwrap().clear(); }
     gpt_out_reset();
     crate::peripherals::ra_port::RaPort::soft_wire_reset();
+    crate::peripherals::ra_port::matrix_trace_reset();
     reset_event_routing();
     for d in DMAC_OUTSTANDING.iter() {
         d.store(0, Relaxed);

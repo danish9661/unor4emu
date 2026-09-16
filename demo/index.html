@@ -31,7 +31,7 @@
   <div class="badges">
     <span class="badge">R7FA4M1AB3CFM</span>
     <span class="badge">Cortex-M4F @ 48MHz</span>
-    <span class="badge ok">199 proofs green</span>
+    <span class="badge ok">203 proofs green</span>
     <span class="badge" id="wasm-size">288 KB wasm</span>
   </div>
 </header>
@@ -102,6 +102,7 @@
       <button class="tab" data-tab="pwm" role="tab">PWM</button>
       <button class="tab" data-tab="aw" role="tab">analogWrite</button>
       <button class="tab" data-tab="aws" role="tab">AnalogWave</button>
+      <button class="tab" data-tab="analog" role="tab">Analog</button>
       <button class="tab" data-tab="tone" role="tab">tone</button>
       <button class="tab" data-tab="sser" role="tab">SoftSerial</button>
       <button class="tab" data-tab="rtcalm" role="tab">RTC alarm</button>
@@ -224,6 +225,16 @@
       <div id="aws-verdict" class="term small"></div>
     </div>
 
+    <div class="tabpane" id="pane-analog">
+      <p class="desc">Real ArduinoCore <span class="mono">analogRead(A0)</span> (ADC ch9, 14-bit) → <span class="mono">analogWrite(DAC, v &gt;&gt; 2)</span> (DAC12, 12-bit) + D13 threshold at <span class="mono">v &gt; 100</span>. Drag the slider mid-run — the firmware re-samples every <span class="mono">delay(50)</span> loop, no reboot needed. ADDR9 / DADR0 / LED below are the verdict.</p>
+      <div class="row">
+        <button id="btn-analog-run" class="btn-acc">Run Analog demo</button>
+      </div>
+      <label class="slider">A0 stimulus <input id="analog-in" type="range" min="0" max="16383" value="2048"> <span id="analog-v">2048</span> / 16383</label>
+      <ol id="analog-steps" class="enum"></ol>
+      <div id="analog-verdict" class="term small"></div>
+    </div>
+
     <div class="tabpane" id="pane-tone">
       <p class="desc">Real ArduinoCore <span class="mono">tone(LED_BUILTIN, 440)</span>: an FspTimer in PERIODIC mode toggles D13 from its overflow IRQ. The LED and grid cell follow live — the toggle is the verdict.</p>
       <div class="row">
@@ -331,9 +342,10 @@
     </div>
 
     <div class="tabpane" id="pane-matrix">
-      <p class="desc">12&times;8 LED matrix, charlieplexed on real GPIO (the same 11 pins as hardware): the sketch multiplexes a smiley faster than the eye. The grid below accumulates lit LEDs with persistence — like vision does. No panel on Minima; the pattern is the verdict.</p>
+      <p class="desc">12&times;8 LED matrix, charlieplexed on real GPIO (the same 11 pins as hardware): the bare-metal sketch multiplexes a smiley faster than the eye, and the Arduino-lib sketch multiplexes the big heart (WiFi-fqbn build, same RA4M1 silicon — matrix pins D28–D38 exist only in the WiFi <span class="mono">g_pin_cfg</span>). The grid below accumulates lit LEDs with persistence — like vision does. No panel on Minima; the pattern is the verdict.</p>
       <div class="row">
         <button id="btn-matrix-run" class="btn-acc">Run Matrix demo</button>
+        <button id="btn-mtx-run" class="btn-acc">Run heart demo</button>
       </div>
       <div id="matrix-grid" class="matrix-grid"></div>
       <ol id="matrix-steps" class="enum"></ol>
@@ -368,7 +380,7 @@
 </main>
 
 <footer>
-  <span>RA4M1 peripheral models proven against arduino-cli firmware (118 + 81 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
+  <span>RA4M1 peripheral models proven against arduino-cli firmware (120 + 83 Rust proofs) &middot; no STM32, no ESP32 in this build</span>
 </footer>
 
 <script type="module" src="app.js"></script>

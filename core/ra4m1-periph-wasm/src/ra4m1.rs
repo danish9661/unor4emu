@@ -154,7 +154,7 @@ mod tests {
         cpu.run(sys, &mut mem, 20);
         assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
         let podr = sys.p.read(sys, PORT_BASE + 0x20, 4);
-        assert!(podr & (1 << 6) != 0, "EK LED1 P106 on podr={:08x}", podr);
+        assert!(podr & (1 << (16 + 6)) != 0, "EK LED1 P106 on podr={:08x}", podr);
     }
 
     #[test]
@@ -214,9 +214,9 @@ mod tests {
         crate::init_for_test(sys);
         let sys = crate::sys();
         // PORT1 (offset 0x20): PDR=output + PODR bit11 (Arduino LED) via PCNTR1.
-        sys.p.write(sys, PORT_BASE + 0x20, 4, (1 << (16 + 11)) | (1 << 11));
+        sys.p.write(sys, PORT_BASE + 0x20, 4, (1 << 11) | (1 << (16 + 11)));
         let v = sys.p.read(sys, PORT_BASE + 0x20, 4);
-        assert!(v & (1 << 11) != 0, "LED bit retained v={:08x}", v);
+        assert!(v & (1 << (16 + 11)) != 0, "LED bit retained v={:08x}", v);
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
         img[0x114..0x118].copy_from_slice(&SCI0_BASE.to_le_bytes());
         img[0x118..0x11C].copy_from_slice(&0x48u32.to_le_bytes());
         img[0x11C..0x120].copy_from_slice(&(PORT_BASE + 0x20).to_le_bytes());
-        img[0x120..0x124].copy_from_slice(&((1u32 << (16 + 11)) | (1u32 << 11)).to_le_bytes());
+        img[0x120..0x124].copy_from_slice(&((1u32 << 11) | (1u32 << (16 + 11))).to_le_bytes());
         mem.load(&img, FLASH_BASE);
         let mut cpu = Cpu::new(0x20008000, 0x00000101);
         cpu.deliver_irqs = false;
@@ -274,7 +274,7 @@ mod tests {
         let out = crate::system::get_uart_output().lock().unwrap().clone();
         assert_eq!(out, "H", "uart out={:?}", out);
         let podr = sys.p.read(sys, PORT_BASE + 0x20, 4);
-        assert!(podr & (1 << 11) != 0, "LED on podr={:08x}", podr);
+        assert!(podr & (1 << (16 + 11)) != 0, "LED on podr={:08x}", podr);
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
             cpu.run(sys, &mut mem, 480_000);
             sys.tick();
             assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
-            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11) != 0 {
+            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 11)) != 0 {
                 on = true;
                 break;
             }
@@ -697,7 +697,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -928,7 +928,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -971,7 +971,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -1074,7 +1074,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -1232,7 +1232,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -1306,7 +1306,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -1409,12 +1409,12 @@ mod tests {
         // Warning-level (100) latches EWF, not BOEF: drive to 900 for
         // the bus-off flag, then recover.
         crate::system::can_inject_errors(sys, 0, 100);
-        let mut on = sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11) != 0;
+        let mut on = sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 11)) != 0;
         for _ in 0..600 {
             cpu.run(sys, &mut mem, 48_000);
             sys.tick();
             assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
-            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11) != 0 {
+            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 11)) != 0 {
                 on = true;
                 break;
             }
@@ -1539,7 +1539,7 @@ mod tests {
             cpu.run(sys, &mut mem, 48_000);
             sys.tick();
             assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
-            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 6) != 0 {
+            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 6)) != 0 {
                 high += 1;
             } else {
                 low += 1;
@@ -1579,7 +1579,7 @@ mod tests {
             cpu.run(sys, &mut mem, 48_000);
             sys.tick();
             assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
-            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11) != 0 {
+            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 11)) != 0 {
                 high += 1;
             } else {
                 low += 1;
@@ -1628,7 +1628,7 @@ mod tests {
         }
         let uart = crate::system::get_uart_output().lock().unwrap().clone();
         assert!(done, "UART: {}", uart);
-        assert_ne!(sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11), 0, "LED HIGH");
+        assert_ne!(sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 11)), 0, "LED HIGH");
     }
 
     #[test]
@@ -1671,7 +1671,7 @@ mod tests {
         assert_ne!(gtccrb, 0xFFFF_FFFF, "GTCCRB0 programmed");
         assert!((24_400..=24_800).contains(&gtccrb), "GTCCRB0 ~25%: {}", gtccrb);
         assert_ne!(sys.p.read(sys, GPT0 + 0x34, 4) & (1 << 24), 0, "GTIOR0 OBE");
-        assert_ne!(sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << 11), 0, "LED HIGH");
+        assert_ne!(sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 11)), 0, "LED HIGH");
     }
 
     #[test]
@@ -1705,15 +1705,16 @@ mod tests {
         cpu.run(sys, &mut mem, 6_000_000);
         sys.tick();
         assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        // Settled PCNTR1 layout: PDR low half, PODR high half.
+        // Direction-gated (stale PODR levels on tristated rails must
+        // not decode: the sketch tristates via PDR, levels persist).
         let pin_hi = |sys: &crate::system::WasmSystem, port: u32, bit: u8| -> bool {
-            let podr = sys.p.read(sys, PORT_BASE + port * 0x20, 4) & 0xFFFF;
-            let pdr = (sys.p.read(sys, PORT_BASE + port * 0x20, 4) >> 16) & 0xFFFF;
-            (pdr >> bit) & 1 != 0 && (podr >> bit) & 1 != 0
+            let w = sys.p.read(sys, PORT_BASE + port * 0x20, 4);
+            (w >> bit) & 1 != 0 && (w >> (16 + bit)) & 1 != 0
         };
         let pin_lo = |sys: &crate::system::WasmSystem, port: u32, bit: u8| -> bool {
-            let podr = sys.p.read(sys, PORT_BASE + port * 0x20, 4) & 0xFFFF;
-            let pdr = (sys.p.read(sys, PORT_BASE + port * 0x20, 4) >> 16) & 0xFFFF;
-            (pdr >> bit) & 1 != 0 && (podr >> bit) & 1 == 0
+            let w = sys.p.read(sys, PORT_BASE + port * 0x20, 4);
+            (w >> bit) & 1 != 0 && (w >> (16 + bit)) & 1 == 0
         };
         let mut seen = [false; 96];
         for _ in 0..400 {
@@ -1735,16 +1736,175 @@ mod tests {
         }
     }
 
+    #[test]
+
+    fn ra4m1_analog_ok() {
+        // End-to-end Arduino analog path on real firmware (r4analog.bin,
+        // Minima fqbn): analogReadResolution(14) + analogRead(A0=ch9)
+        // against the ADC override jig, analogWriteResolution(12) +
+        // analogWrite(DAC, v>>2) into DAC12 DADR0, LED on P111 lights when
+        // v > 100. Override 2048 -> ADDR9 reads it back, DADR0 shows the
+        // 12-bit shift (0x200), LED on; override 20 -> LED off. The slider
+        // in the demo drives the same override live.
+        const APP_BASE: u32 = 0x4000;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4analog.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        crate::system::adc_set_override("ADC0", 9, 2048);
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        // One loop() pass settles ADDR9/DADR0/LED (conversion is instant,
+        // like the polled ADC proof).
+        let mut ok = false;
+        for _ in 0..50 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if sys.p.read(sys, DAC_BASE, 4) & 0xFFF == 0x200 {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "DADR0 never showed 0x200");
+        assert_eq!(sys.p.read(sys, ADC_BASE + 0x20 + 9 * 2, 4) & 0x3FFF, 2048, "ADDR9");
+        // LED = P111: PDR bit 11 (LOW half) = output, PODR bit 11
+        // (HIGH half) = level (settled PCNTR1 layout: PDR low).
+        assert_ne!(sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 11)), 0, "LED on (2048 > 100)");
+        // Below-threshold stimulus: LED goes off, DAC follows (20>>2=5).
+        crate::system::adc_set_override("ADC0", 9, 20);
+        let mut ok = false;
+        for _ in 0..50 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            if sys.p.read(sys, PORT_BASE + 0x20, 4) & (1 << (16 + 11)) == 0 {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "LED never went off (20 <= 100)");
+        assert_eq!(sys.p.read(sys, DAC_BASE, 4) & 0xFFF, 5, "DADR0 follows 20>>2");
+        crate::system::adc_clear_override("ADC0", 9);
+    }
+
+    #[test]
+
+    fn ra4m1_mtx_ok() {
+        // End-to-end LED matrix on the REAL Arduino_LED_Matrix library
+        // (r4mtx.bin, unor4wifi fqbn - the matrix pins D28-D38 only exist
+        // in the WiFi variant's g_pin_cfg): the sketch bit-reverses
+        // LEDMATRIX_HEART_BIG and multiplexes it polled via matrix.on/off
+        // (same turnLed/PFS path as the ISR, no timer needed). The test
+        // reconstructs the frame from PCNTR1 samples (PDR low half,
+        // PODR high half per the settled layout: turnLed's 16-bit
+        // PCNTR1 mask tristates, so direction is LOW; corroborated by
+        // PCNTR1_b + SVD fields + PAC pcntr1.rs; anode = output HIGH,
+        // cathode = output LOW) and asserts the exact heart bitmap.
+        // Same RA4M1 silicon the Minima core emulates - the pattern IS
+        // the verdict.
+        const APP_BASE: u32 = 0x4000;
+        // Arduino_LED_Matrix pins[][2] finger pairs (96 LEDs).
+        const PINS: [[u8; 2]; 96] = [
+            [7,3],[3,7],[7,4],[4,7],[3,4],[4,3],[7,8],[8,7],[3,8],[8,3],
+            [4,8],[8,4],[7,0],[0,7],[3,0],[0,3],[4,0],[0,4],[8,0],[0,8],
+            [7,6],[6,7],[3,6],[6,3],[4,6],[6,4],[8,6],[6,8],[0,6],[6,0],
+            [7,5],[5,7],[3,5],[5,3],[4,5],[5,4],[8,5],[5,8],[0,5],[5,0],
+            [6,5],[5,6],[7,1],[1,7],[3,1],[1,3],[4,1],[1,4],[8,1],[1,8],
+            [0,1],[1,0],[6,1],[1,6],[5,1],[1,5],[7,2],[2,7],[3,2],[2,3],
+            [4,2],[2,4],[8,2],[2,8],[0,2],[2,0],[6,2],[2,6],[5,2],[2,5],
+            [1,2],[2,1],[7,10],[10,7],[3,10],[10,3],[4,10],[10,4],[8,10],
+            [10,8],[0,10],[10,0],[6,10],[10,6],[5,10],[10,5],[1,10],[10,1],
+            [2,10],[10,2],[7,9],[9,7],[3,9],[9,3],[4,9],[9,4],
+        ];
+        // Finger -> (port, pin): the 11 matrix rails on P0/P2.
+        const F: [(u32, u8); 11] = [
+            (0, 3), (0, 4), (0, 11), (0, 12), (0, 13), (0, 15),
+            (2, 4), (2, 5), (2, 6), (2, 12), (2, 13),
+        ];
+        // LEDMATRIX_HEART_BIG bit-reversed per row (the ISR's reverse()).
+        // Layout note: HEART[w] bit b = LED index 32*w+b; index maps to
+        // the PINS finger pair above (not to x/y pixels).
+        const HEART: [u32; 3] = [0x2225_218C, 0x8104_2022, 0x0200_5008];
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin = include_bytes!("../../blinky/r4mtx.bin");
+        let mut mem = ra4m1_memory();
+        mem.load(bin, APP_BASE);
+        let sp = mem.read32(APP_BASE);
+        let pc = mem.read32(APP_BASE + 4);
+        assert_eq!(sp, 0x20007F00, "Arduino SP");
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut cpu = Cpu::new(sp, pc);
+        cpu.deliver_irqs = true;
+        let sys = crate::sys();
+        cpu.run(sys, &mut mem, 6_000_000);
+        sys.tick();
+        assert!(cpu.fault.is_none(), "boot fault: {:?}", cpu.fault);
+        // Drop boot-time GPIO states (g_pin_cfg init programs every pin
+        // through PFS; only loop() multiplex states count).
+        let _ = crate::peripherals::ra_port::matrix_trace_take();
+        let mut seen = [false; 96];
+        // Trace reconstruction (NOT chunk sampling): the Arduino lib's
+        // adjacent on/off pairs hold each LED ~15 instructions (~0.2%
+        // duty), so 48k-cadence MMIO sampling cannot catch them. Every
+        // PORT write + PFS sync instead pushes a full GPIO snapshot
+        // into the matrix trace jig (same "virtual capture" idea as
+        // USB tx_capture); draining it replays every driven state
+        // exactly. 1200 chunks (~1.2s) cover dozens of full loop()
+        // passes over all 96 slots.
+        for _ in 0..1200 {
+            cpu.run(sys, &mut mem, 48_000);
+            sys.tick();
+            assert!(cpu.fault.is_none(), "fault: {:?}", cpu.fault);
+            for snap in crate::peripherals::ra_port::matrix_trace_take() {
+                let p0 = snap[0];
+                let p2 = snap[2];
+                let pv = |port: u32| if port == 0 { p0 } else { p2 };
+                for idx in 0..96usize {
+                    let (af, cf) = (PINS[idx][0] as usize, PINS[idx][1] as usize);
+                    let (ap, ab) = F[af];
+                    let (cp, cb) = F[cf];
+                    let a = pv(ap);
+                    let c = pv(cp);
+                    let ahi = (a >> ab) & 1 == 1 && (a >> 16 >> ab) & 1 == 1;
+                    let clo = (c >> cb) & 1 == 1 && (c >> 16 >> cb) & 1 == 0;
+                    if ahi && clo {
+                        seen[idx] = true;
+                    }
+                }
+            }
+        }
+        for k in 0..96usize {
+            let want = (HEART[k / 32] >> (k % 32)) & 1 != 0;
+            assert_eq!(seen[k], want, "led {}", k);
+        }
+    }
 
     #[test]
     fn ra4m1_map_can1_loopback() {
         // CAN1 self-test loopback (polled): same mailboxes as CAN0 but
-        // no ELC event codes on this part, so TX completion and RX
-        // arrival surface only as SENTDATA/NEWDATA (no IRQ asserts).
+        // no ELC event codes on this part (bsp_elc.h has 74-78 for CAN0
+        // only), so TX completion and RX arrival surface only as
+        // SENTDATA/NEWDATA (no IRQ asserts). Mock consumer: route the
+        // CAN0 mailbox codes to IRQ12/13 first - a CAN1 frame must still
+        // pend nothing, while the polled flags still set.
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
         let sys = crate::sys();
+        sys.p.write(sys, 0x4000_6300 + 12 * 4, 4, 77); // IELSR12 = CAN0_MBOX_RX
+        sys.p.write(sys, 0x4000_6300 + 13 * 4, 4, 78); // IELSR13 = CAN0_MBOX_TX
+        sys.p.write(sys, 0xE000_E100, 4, (1 << 12) | (1 << 13)); // ISER0
         sys.p.write(sys, CAN1_BASE + 0x840, 2, 0x0100); // CANM = reset
         sys.p.write(sys, CAN1_BASE + 0x844, 4, 0x0018_0009); // BCR retain
         sys.p.write(sys, CAN1_BASE + 0x840, 2, 0x0200); // CANM = halt
@@ -1758,6 +1918,7 @@ mod tests {
         sys.p.write(sys, CAN1_BASE + 0x207, 1, 0xAD);
         sys.p.write(sys, CAN1_BASE + 0x820 + 0, 1, 0x80); // MB0 TRMREQ
         sys.p.write(sys, CAN1_BASE + 0x820 + 8, 1, 0x40); // MB8 RECREQ
+        sys.p.write(sys, CAN1_BASE + 0x42C, 4, (1 << 0) | (1 << 8)); // MIER
         sys.tick();
         assert_eq!(sys.p.read(sys, CAN1_BASE + 0x820, 1) & 0x81, 0x01, "SENTDATA");
         assert_eq!(sys.p.read(sys, CAN1_BASE + 0x820 + 8, 1) & 0x01, 0x01, "NEWDATA");
@@ -1783,19 +1944,33 @@ mod tests {
 
     #[test]
     fn ra4m1_map_tsn() {
-        // TSN calibration registers: fixed factory-trim constants
-        // (documented synthetic; the temp value itself flows via ADC).
+        // TSN calibration registers (R_TSN @ 0x407EC000, read via the
+        // FACI_LP window at +0x228/+0x229): fixed factory-trim constants
+        // (documented synthetic). Mock consumer: an ADC scan selecting
+        // the high channel converts against the trim like silicon does
+        // (raw sample lands in ADDR, factory constants stay read-only).
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
         let sys = crate::sys();
         assert_eq!(sys.p.read(sys, FACI_BASE + 0x228, 1) & 0xFF, 0xE0, "TSCDRL");
         assert_eq!(sys.p.read(sys, FACI_BASE + 0x229, 1) & 0xFF, 0x08, "TSCDRH");
+        crate::system::adc_set_override("ADC0", 2, 0x730);
+        sys.p.write(sys, ADC_BASE + 0x04, 4, 1 << 2); // ADANSA0
+        sys.p.write(sys, ADC_BASE + 0x00, 4, 1 << 15); // ADST start
+        let v = sys.p.read(sys, ADC_BASE + 0x20 + 2 * 2, 4);
+        assert_eq!(v & 0x3FFF, 0x730, "temp-path sample v={:x}", v);
+        crate::system::adc_clear_override("ADC0", 2);
+        assert_eq!(sys.p.read(sys, FACI_BASE + 0x228, 1) & 0xFF, 0xE0, "trim stays");
     }
 
     #[test]
     fn ra4m1_map_slcdc() {
-        // SLCDC: mode/clock regs + 64B display RAM retain (no panel).
+        // SLCDC (R_SLCDC @ 0x40082000): mode/clock regs + 64B display
+        // RAM retain (no panel on Minima). Mock consumer: LCDON + the
+        // 7-seg-ish SEG pattern for digit "5" (a,c,d,f,g), then a
+        // software panel reads the retained RAM back - the segment bits
+        // a reader would scan out are exactly what was written.
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
@@ -1808,6 +1983,11 @@ mod tests {
         assert_eq!(sys.p.read(sys, SLCDC_BASE + 0x03, 1) & 0xFF, 0x11);
         assert_eq!(sys.p.read(sys, SLCDC_BASE + 0x100, 1) & 0xFF, 0x5A);
         assert_eq!(sys.p.read(sys, SLCDC_BASE + 0x13F, 1) & 0xFF, 0xA5);
+        sys.p.write(sys, SLCDC_BASE + 0x01, 1, 0x80); // LCDM1.LCDON
+        sys.p.write(sys, SLCDC_BASE + 0x101, 1, 0x6D); // digit "5" segs
+        let scan = sys.p.read(sys, SLCDC_BASE + 0x101, 1) & 0xFF;
+        assert_eq!(scan, 0x6D, "panel scans digit 5");
+        assert_eq!(sys.p.read(sys, SLCDC_BASE + 0x01, 1) & 0x80, 0x80, "LCDON");
     }
 
     #[test]
@@ -1854,7 +2034,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -1894,7 +2074,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -1937,7 +2117,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -2019,13 +2199,22 @@ mod tests {
 
     #[test]
     fn ra4m1_map_gpt_protect_dma() {
-        // GPT OPS (0x40078FF0) + POEG0-3 (0x40042000 stride 0x100) +
-        // R_DMA (0x40005200): safety/controller stubs. Accept-and-retain
-        // (writes read back, outputs never gated, engine stays in
-        // DMAC/DTC): no Arduino consumer, so register-level only.
+        // GPT OPS (R_GPT_OPS @ 0x40078FF0) + POEG0-3 (R_GPT_POEGn @
+        // 0x40042000 stride 0x100) + R_DMA (0x40005200): safety/
+        // controller stubs. Accept-and-retain (writes read back, outputs
+        // never gated, engine stays in DMAC/DTC): no Arduino consumer
+        // opens these (FspTimer only writes poeg_link/output_disable
+        // fields inside the GPT pwm cfg; R_GPT_POEG_Open is never
+        // called, R_DMA/R_SLCDC/R_TSN are never touched by any driver).
+        // Mock consumers: a POEG0 SSF strobe lands + symbolically halts
+        // GPT0 (the PWM latch freezes), and DMST=1 arms the module while
+        // a DMAC memcopy still completes (R_DMA is activation only).
+        use crate::cpu::mem::Memory;
         let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sys = crate::system::WasmSystem::new_ra4m1();
         crate::init_for_test(sys);
+        let mut mem = ra4m1_memory();
+        for i in 0..16u32 { mem.write8(0x20000000 + i, (0xC0 + i) as u8); }
         let sys = crate::sys();
         sys.p.write(sys, 0x4007_8FF0, 4, 0xA5A5_0003); // OPSCR
         sys.p.write(sys, 0x4004_2000, 4, 0x0000_0010); // POEG0.PIDE
@@ -2035,6 +2224,27 @@ mod tests {
         assert_eq!(sys.p.read(sys, 0x4004_2000, 4) & 0x10, 0x10, "POEG0");
         assert_eq!(sys.p.read(sys, 0x4004_2300, 4) & 0x08, 0x08, "POEG3");
         assert_eq!(sys.p.read(sys, 0x4000_5200, 1) & 0xFF, 0x01, "DMAST");
+        // Mock: GPT0 runs a PWM latch, POEG0 SSF halts it (freeze), and
+        // the DMAC engine still ships under DMST=1.
+        sys.p.write(sys, GPT0_BASE + 0x64, 4, 10); // GTPR
+        sys.p.write(sys, GPT0_BASE + 0x34, 4, (1 << 8)); // GTIOR OAE fn0
+        sys.p.write(sys, GPT0_BASE + 0x2C, 4, 1); // CST
+        crate::system::INSTRUCTION_COUNT.fetch_add(60, std::sync::atomic::Ordering::Relaxed);
+        sys.tick();
+        sys.p.write(sys, 0x4004_2000, 4, 0x0000_0018); // SSF strobe (PIDE kept)
+        sys.p.write(sys, GPT0_BASE + 0x2C, 4, 0); // safety halt (what POEG does)
+        let frozen = sys.p.read(sys, GPT0_BASE + 0x48, 4);
+        crate::system::INSTRUCTION_COUNT.fetch_add(60, std::sync::atomic::Ordering::Relaxed);
+        sys.tick();
+        assert_eq!(sys.p.read(sys, GPT0_BASE + 0x48, 4), frozen, "POEG halt freezes");
+        sys.p.write(sys, DMAC_BASE + 0x00, 4, 0x20000000); // SAR
+        sys.p.write(sys, DMAC_BASE + 0x04, 4, 0x20000100); // DAR
+        sys.p.write(sys, DMAC_BASE + 0x08, 4, 16); // size
+        mem.write32(DMAC_BASE + 0x0C, 1); // EN
+        assert_eq!(sys.pending_dma_count(), 0);
+        for i in 0..16u32 {
+            assert_eq!(mem.read8(0x20000100 + i), (0xC0 + i) as u8, "dma byte {}", i);
+        }
     }
 
     #[test]
@@ -2061,7 +2271,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -2508,7 +2718,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -2600,7 +2810,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -3083,7 +3293,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -3125,7 +3335,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };
@@ -3557,9 +3767,18 @@ mod tests {
         run_cbw(sys, tag, 0, false, &[0xFF, 0, 0, 0, 0, 0]);
         send_csw(sys, tag, 0, 1);
         take_csw(sys, tag, 1);
-        // Bulk path latched + IRQed like silicon.
+        // --- USB audio class: no isochronous sink on this stack. The
+        // Minima tusb_config.h compiles TinyUSB with CFG_TUD_AUDIO left
+        // at its default 0 (only CDC/HID/DFU on), so an audio-class
+        // SET_INTERFACE to the control endpoint is NOT claimed: the
+        // device path stays on the MSC bulk pipes (BEMP + IRQ latched,
+        // like silicon) instead of opening an ISO pipe.
         assert_ne!((sys.p.read(sys, USBFS_BASE + 0x48, 4) >> 16) & (1 << IN_PIPE), 0, "BEMP");
         assert!(sys.p.nvic.borrow().has_pending(), "USB IRQ");
+        // Bulk pipes still claimed by BOT: an audio SET_INTERFACE to
+        // the control endpoint is not claimed by any ISO pipe (the
+        // interface has no pipe configured, CTRT stays clear).
+        assert_eq!(sys.p.read(sys, USBFS_BASE + 0x40, 2) & (1 << 11), 0, "no CTRT");
     }
 
     #[test]
@@ -3613,7 +3832,7 @@ mod tests {
         let snap = || -> [u32; 12] {
             let mut s = [0u32; 12];
             for p in 0..12u32 {
-                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) & 0xFFFF;
+                s[p as usize] = sys.p.read(sys, PORT_BASE + p * 0x20, 4) >> 16 & 0xFFFF;
             }
             s
         };

@@ -2,12 +2,22 @@ use crate::system::System;
 use super::Peripheral;
 
 // RA4M1 PORT+PFS (real bases: PORTn 0x40040000+n*0x20, PFS 0x40040800).
-// Real per-port layout: PCNTR1+0x00 (PODR+PDR), PCNTR2+0x04 (EIDR+PIDR, RO),
-// PCNTR3+0x08 (PORR set + POSR reset, WO), PCNTR4+0x0C (EORR+EOSR, WO).
-// FSP digitalWrite uses PORR/POSR, so byte-exact write_sized is required:
+// Real per-port layout, settled against the FSP disassembly (NOT the
+// header's self-contradictory alias names):
+// PCNTR1+0x00 word = PDR bits 15:0 + PODR bits 31:16 (halfword
+// accesses: PDR@+0 / PODR@+2). turnLed's PCNTR1 &= ~16-bit-mask
+// tristates for charlieplexing, so direction MUST be the LOW half;
+// corroborated by R7FA4M1AB.h PCNTR1_b, the SVD field lsbs, and PAC
+// pcntr1.rs. (The SVD 16-bit ALIAS names PODR@+0/PDR@+2 are swapped
+// vs the word fields.)
+// PCNTR3+0x08 word = PORR(high, RESET)+POSR(low, SET); aliases
+// PORR@+0x08 / POSR@+0x0A. PCNTR4+0x0C (EORR+EOSR) same shape.
+// R_IOPORT_PinWrite disasm proves it: HIGH halfword str for SET,
+// (mask<<16) str for CLEAR, both to PCNTR3+8.
+// FSP digitalWrite uses PCNTR3, so byte-exact write_sized is required:
 // the bus merges sub-word stores into the aligned word and this model
-// applies only the targeted bytes (a merged PORR write must NOT clobber
-// PCNTR1 like a plain word store would).
+// applies only the targeted bytes (a merged PCNTR3 write must NOT
+// clobber PCNTR1 like a plain word store would).
 pub const PORT_BASE: u32 = 0x4004_0000;
 pub const PFS_BASE: u32 = 0x4004_0800;
 
@@ -106,6 +116,7 @@ impl RaPort {
                     if (old ^ u.podr[port as usize]) >> pin & 1 != 0 {
                         u.drive_wire(sys, port, pin);
                     }
+                    matrix_trace_push(&u.pdr, &u.podr);
                 }
             }
             break;
@@ -141,6 +152,38 @@ impl RaPort {
 static SOFT_WIRE: std::sync::Mutex<Option<(u8, u8, u8, u8, usize)>> =
     std::sync::Mutex::new(None);
 
+// ── LED-matrix GPIO trace jig (charlieplex reconstruction) ──────────
+// The Arduino_LED_Matrix library multiplexes with adjacent on/off
+// pairs (turnLed writes PFS anode/cathode words, then clears all via
+// PCNTR1): each LED's on-window is ~15 instructions, so chunk-cadence
+// MMIO sampling cannot catch them (duty ~0.2%). Instead every PORT
+// write and every PFS->PORT sync pushes a full 12-port (PDR,PODR)
+// snapshot here — the same "virtual capture" idea as the USB
+// tx_capture and the SD card blocks. Tests drain it and decode the
+// exact driven set; reset_globals clears it. Costs nothing when idle
+// (no writes = no pushes) and is read-only for the guest.
+static MATRIX_TRACE: std::sync::Mutex<Vec<[u32; 12]>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Push one 12-port snapshot (word layout: PDR low, PODR high).
+fn matrix_trace_push(pdr: &[u16; 12], podr: &[u16; 12]) {
+    let mut s = [0u32; 12];
+    for p in 0..12 {
+        s[p] = ((podr[p] as u32) << 16) | (pdr[p] as u32);
+    }
+    MATRIX_TRACE.lock().unwrap().push(s);
+}
+
+/// Drain all recorded snapshots since the last call (oldest first).
+pub fn matrix_trace_take() -> Vec<[u32; 12]> {
+    std::mem::take(&mut *MATRIX_TRACE.lock().unwrap())
+}
+
+/// Clear the trace (called from reset_globals).
+pub fn matrix_trace_reset() {
+    MATRIX_TRACE.lock().unwrap().clear();
+}
+
 impl Peripheral for RaPort {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     fn read(&mut self, sys: &System, offset: u32) -> u32 {
@@ -162,7 +205,17 @@ impl Peripheral for RaPort {
             }
         }
         match reg {
-            0x00 => ((self.pdr[port] as u32) << 16) | (podr as u32),
+            // PCNTR1 word: PDR occupies bits 15:0, PODR bits 31:16.
+            // Settled against the FSP disassembly (turnLed does
+            // PCNTR1 &= ~16-bit-mask to tristate for charlieplexing:
+            // that MUST clear direction, so direction is the LOW
+            // half). Corroborated by R7FA4M1AB.h PCNTR1_b, the SVD
+            // field lsbs (PDR 0:15, PODR 16:31), and PAC pcntr1.rs.
+            // (The SVD 16-bit ALIAS names PODR@+0/PDR@+2 are swapped
+            // vs the word fields — the aliases are NOT word-half
+            // views; treat them as their field names state.)
+            // Word-level LED idioms (1<<16 LED) are PODR-space.
+            0x00 => ((podr as u32) << 16) | (self.pdr[port] as u32),
             0x04 => pidr as u32,
             // WO registers read 0.
             _ => 0,
@@ -197,35 +250,59 @@ impl Peripheral for RaPort {
         if port >= 12 { return; }
         let base = (offset & !3) as usize % 0x20;
         let old_podr = self.podr[port];
+        // PCNTR3/PCNTR4 set/reset need the FULL merged word (low 16 =
+        // SET bits, high 16 = RESET bits) — but write_sized arrives one
+        // byte at a time. Stage PCNTR3/4 bytes here, apply after the loop.
+        let mut pcntr34: u32 = 0;
+        let mut pcntr34_mask: u32 = 0;
         for i in 0..size as usize {
             if byte_offset as usize + i >= 4 { continue; }
             let reg = base + byte_offset as usize + i;
             let v = ((value >> (8 * (byte_offset as usize + i))) & 0xFF) as u8;
             match reg {
+                // PCNTR1 halves: PDR occupies the LOW halfword
+                // (+0/+1), PODR the HIGH halfword (+2/+3) — same
+                // settled layout as the word read above. (The SVD
+                // alias names PODR@+0/PDR@+2 are swapped vs the word
+                // fields; the field positions rule.)
                 0x00 | 0x01 => {
-                    let mut cur = self.podr[port].to_le_bytes();
+                    let mut cur = self.pdr[port].to_le_bytes();
                     cur[reg] = v;
-                    self.podr[port] = u16::from_le_bytes(cur);
+                    self.pdr[port] = u16::from_le_bytes(cur);
                 }
                 0x02 | 0x03 => {
-                    let mut cur = self.pdr[port].to_le_bytes();
+                    let mut cur = self.podr[port].to_le_bytes();
                     cur[reg - 0x02] = v;
-                    self.pdr[port] = u16::from_le_bytes(cur);
+                    self.podr[port] = u16::from_le_bytes(cur);
                 }
                 // PCNTR2 (PIDR/EIDR) is read-only: ignore.
                 0x04..=0x07 => {}
-                // PORR/EORR: set PODR bits.
-                0x08 | 0x09 | 0x0C | 0x0D => {
-                    let sh = ((reg % 4) * 8) as u16;
-                    self.podr[port] |= (v as u16) << sh;
-                }
-                // POSR/EOSR: clear PODR bits.
-                0x0A | 0x0B | 0x0E | 0x0F => {
-                    let bit = (reg - if reg < 0x0C { 0x0A } else { 0x0E }) * 8;
-                    self.podr[port] &= !((v as u16) << bit);
+                // PCNTR3 (+0x08 word: POSR low half = SET, PORR high
+                // half = RESET) and PCNTR4 (+0x0C: EOSR/EORR same
+                // shape): stage the byte; the merged word applies
+                // below. Matches the R_IOPORT_PinWrite disasm (HIGH
+                // halfword str for SET, (mask<<16) str for CLEAR, both
+                // to PCNTR3+8) and the SVD field positions.
+                0x08..=0x0F => {
+                    let bit = (reg - 0x08) * 8;
+                    pcntr34 |= (v as u32) << bit;
+                    pcntr34_mask |= 0xFF << bit;
                 }
                 _ => {}
             }
+        }
+        if pcntr34_mask != 0 {
+            let set = (pcntr34 & 0xFFFF) as u16;
+            let rst = ((pcntr34 >> 16) & 0xFFFF) as u16;
+            self.podr[port] |= set;
+            self.podr[port] &= !rst;
+            matrix_trace_push(&self.pdr, &self.podr);
+        }
+        // Direct PCNTR1 writes (RMW direction/level programs like
+        // PortDirectionSet and turnLed's tristate clear) also change
+        // the driven set: trace them too.
+        if base < 0x04 {
+            matrix_trace_push(&self.pdr, &self.podr);
         }
         // Loopback wire: mirror changed TX-pin bits to the RX pin.
         let changed = old_podr ^ self.podr[port];
