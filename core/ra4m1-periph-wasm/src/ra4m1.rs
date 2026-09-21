@@ -3854,4 +3854,206 @@ mod tests {
         }
         assert!(toggled, "no PORT output change in 1200ms virtual");
     }
+
+    // ── Component-API proofs (OpenHW-style runners drive these, not MMIO) ──
+    // Each proof boots the same fixtures the MMIO proofs use, then talks
+    // only through the component surface and asserts the same verdict.
+
+    #[test]
+    fn ra4m1_component_gpio_pins() {
+        // Arduino pin map + level read + input drive + button verdict.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // Map spot-checks against MINIMA variant.cpp g_pin_cfg.
+        assert_eq!(crate::arduino_pin_to_port_bit(13), (1 << 8) | 11, "D13=P111");
+        assert_eq!(crate::arduino_pin_to_port_bit(6), (1 << 8) | 6, "D6=P106");
+        assert_eq!(crate::arduino_pin_to_port_bit(14), (0 << 8) | 14, "A0=P014");
+        assert_eq!(crate::arduino_pin_to_port_bit(20), -1, "no pin 20");
+        // LED off at reset; digitalWrite HIGH via POSR shows on the pin.
+        // (POSR/PORR live at PCNTR3+0x08: SET word = mask, CLEAR word =
+        // mask << 16 — the R_IOPORT_PinWrite disasm shape.)
+        assert_eq!(crate::gpio_read_pin(13), 0, "D13 low at reset");
+        assert_eq!(crate::gpio_read_pin(99), -1, "unmapped read");
+        assert!(!crate::gpio_set_pin_input(99, true), "unmapped drive");
+        sys.p.write(sys, PORT_BASE + 0x20 + 0x08, 4, 1 << 11); // POSR: P111 SET
+        assert_eq!(crate::gpio_read_pin(13), 1, "D13 HIGH after POSR");
+        sys.p.write(sys, PORT_BASE + 0x20 + 0x08, 4, 1 << (16 + 11)); // PORR: RESET
+        assert_eq!(crate::gpio_read_pin(13), 0, "D13 LOW after PORR");
+        // Input drive lands in PIDR where digitalRead observes it.
+        assert!(crate::gpio_set_pin_input(2, true), "D2 drive");
+        assert_eq!(sys.p.read(sys, PORT_BASE + 1 * 0x20 + 0x04, 4) & (1 << 5), 1 << 5, "D2 PIDR");
+        assert!(crate::gpio_set_pin_input(2, false), "D2 release");
+        assert_eq!(sys.p.read(sys, PORT_BASE + 1 * 0x20 + 0x04, 4) & (1 << 5), 0, "D2 PIDR clear");
+        // board_info shape (chip/flash/ram/dataflash/app/fcpu/kind).
+        let bi = crate::board_info();
+        assert_eq!(bi, vec![0x4D31, 262144, 32768, 8192, 0x4000, 48_000_000, 0], "board_info");
+    }
+
+    #[test]
+    fn ra4m1_component_can_frame() {
+        // CAN frame exchange without guest MMIO: self-test loopback
+        // must be armed first (same TCR the MMIO proof programs).
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0100); // CANM = reset
+        sys.p.write(sys, CAN0_BASE + 0x844, 4, 0x0018_0009); // BCR retain
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0200); // CANM = halt
+        sys.p.write(sys, CAN0_BASE + 0x858, 1, 0x07); // TCR self-test
+        sys.p.write(sys, CAN0_BASE + 0x840, 2, 0x0000); // CANM = operation
+        sys.p.write(sys, CAN0_BASE + 0x820 + 8, 1, 0x40); // MB8 RECREQ receiver
+        sys.p.write(sys, CAN0_BASE + 0x42C, 4, (1 << 0) | (1 << 8)); // MIER
+        let rx = crate::can_send_frame(0, 0x123, &[0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7]);
+        assert_eq!(rx.len(), 11, "id_hi+id_lo+dlc+8 data, got {:?}", rx);
+        assert_eq!(((rx[0] << 16) | rx[1]) & 0x7FF, 0x123, "SID");
+        assert_eq!(rx[2], 8, "DLC");
+        assert_eq!(&rx[3..], &[0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7], "payload");
+        // No receiver offered -> NMLST, empty verdict.
+        sys.p.write(sys, CAN0_BASE + 0x820 + 8, 1, 0x00); // MB8 TX mode (no RECREQ anywhere)
+        for mb in 0..32u32 {
+            sys.p.write(sys, CAN0_BASE + 0x820 + mb, 1, 0x00);
+        }
+        let _ = crate::can_take_rx_fifo(); // drain FIFO path first
+        let rx2 = crate::can_send_frame(1, 0x321, &[1, 2, 3]);
+        assert!(rx2.is_empty(), "no receiver -> empty, got {:?}", rx2);
+        // FIFO drain path: enable RFE, loop a frame, take it back.
+        sys.p.write(sys, CAN0_BASE + 0x848, 1, 0x01); // RFCR.RFE
+        let rx3 = crate::can_send_frame(2, 0x321, &[0xCA, 0xFE]);
+        assert_eq!(rx3.len(), 11, "fifo frame, got {:?}", rx3);
+        let fifo = crate::can_take_rx_fifo();
+        assert_eq!(fifo.len(), 10, "id+dlc+8, got {:?}", fifo);
+        assert_eq!(fifo[0] & 0x7FF, 0x321, "fifo SID");
+        assert_eq!(fifo[1], 2, "fifo DLC");
+        assert_eq!(&fifo[2..4], &[0xCA, 0xFE], "fifo payload");
+        assert!(crate::can_take_rx_fifo().is_empty(), "fifo drained");
+    }
+
+    #[test]
+    fn ra4m1_component_ssi_bridge() {
+        // SSI sample bridge: guest TX words drain, injected RX lands.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, SSI0_BASE + 0x10, 4, 0x03); // TFRST+RFRST
+        sys.p.write(sys, SSI0_BASE + 0x00, 4, 0x03); // REN+TEN
+        sys.p.write(sys, SSI0_BASE + 0x18, 4, 0x11111111);
+        sys.p.write(sys, SSI0_BASE + 0x18, 4, 0x22222222);
+        let out = crate::ssi_exchange(&[0xAAAA5555]);
+        // [tx0, tx1, SENTINEL, rx_depth]: no ticks ran, so the RX
+        // pattern counter has not filled yet — only our sample counts.
+        assert_eq!(out[..2], [0x11111111, 0x22222222], "tx drained {:?}", out);
+        assert_eq!(out[2], 0xFFFF_FFFF, "sentinel {:?}", out);
+        assert_eq!(out[3], 1, "rx depth {:?}", out);
+        assert_eq!(sys.p.read(sys, SSI0_BASE + 0x1C, 4), 0xAAAA5555, "injected sample");
+    }
+
+    #[test]
+    fn ra4m1_component_spi_exchange() {
+        // RSPI byte exchange: slave stages, master clocks, peek is clean.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, SPI1_BASE + 0x00, 1, 0x40); // slave: SPE, MSTR=0
+        sys.p.write(sys, SPI1_BASE + 0x04, 1, 0x5A); // slave stages TX
+        let r = crate::spi_exchange(SPI1_BASE, 0xA5);
+        assert_eq!(r, vec![0x5A, 0xA0], "staged reply + SPRF+SPTEF, got {:?}", r);
+        // Slave RDR holds MOSI, SPRF set, guest data read still intact.
+        assert_eq!(sys.p.read(sys, SPI1_BASE + 0x04, 1) & 0xFF, 0xA5, "slave RDR");
+        // Master peek: no card, no slave on ch0 -> pulled-up 0xFF.
+        sys.p.write(sys, SPI0_BASE + 0x00, 1, 0x48); // master: MSTR + SPE
+        let r2 = crate::spi_exchange(SPI0_BASE, 0x11);
+        assert_eq!(r2[0], 0xFF, "idle bus pulls up, got {:?}", r2);
+        assert_eq!(r2[1] & (1 << 5), 1 << 5, "SPTEF always, got {:?}", r2);
+        // Guest master shift still works after peeks (RDR unconsumed).
+        sys.p.write(sys, SPI0_BASE + 0x04, 1, 0x22);
+        assert_eq!(sys.p.read(sys, SPI0_BASE + 0x04, 1) & 0xFF, 0xFF, "guest shift");
+    }
+
+    #[test]
+    fn ra4m1_component_i2c_exchange() {
+        // I2C component exchange vs the 0x50 virtual EEPROM: pointer +
+        // data + stream-back, wrong address NACKs, guest state clean.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        sys.p.write(sys, IIC1_BASE + 0x00, 1, 0x80); // ICE (clock the model)
+        let back = crate::i2c_exchange(0x50, &[0x10, 0xBE, 0xEF], 0);
+        assert!(back.is_empty(), "write-only, got {:?}", back);
+        let back = crate::i2c_exchange(0x50, &[0x10], 2);
+        assert_eq!(back, vec![0xBE, 0xEF], "stream-back, got {:?}", back);
+        let nack = crate::i2c_exchange(0x51, &[0x00], 2);
+        assert!(nack.is_empty(), "0x51 NACKs, got {:?}", nack);
+        // Guest-master live state untouched (bus free, no pending byte).
+        assert_eq!(sys.p.read(sys, IIC1_BASE + 0x01, 1) & 0x80, 0, "BBSY free");
+        assert_eq!(sys.p.read(sys, IIC1_BASE + 0x09, 1) & (1 << 7), 1 << 7, "TDRE idle");
+    }
+
+    #[test]
+    fn ra4m1_component_dma_queue() {
+        // DMA component API: queue depth, descriptor take, completion
+        // latch, DTC pending probe. Uses the legacy memcopy staging
+        // (SAR/DAR/size + EN), the same path the MMIO proof drives.
+        use crate::cpu::mem::Memory;
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let mut mem = ra4m1_memory();
+        for i in 0..16u32 { mem.write8(0x20000000 + i, (0xA0 + i) as u8); }
+        let sys = crate::sys();
+        assert_eq!(crate::dma_pending_count(), 0, "queue empty at reset");
+        assert!(crate::dma_take_pending(0).is_empty(), "nothing to take");
+        assert!(!crate::dma_check_completion(0), "no latch yet");
+        sys.p.write(sys, DMAC_BASE + 0x00, 4, 0x20000000); // SAR
+        sys.p.write(sys, DMAC_BASE + 0x04, 4, 0x20000100); // DAR
+        sys.p.write(sys, DMAC_BASE + 0x08, 4, 16);         // size
+        mem.write32(DMAC_BASE + 0x0C, 1);                  // EN stages it
+        assert_eq!(crate::dma_pending_count(), 0, "sync drain is inline");
+        for i in 0..16u32 {
+            assert_eq!(mem.read8(0x20000100 + i), (0xA0 + i) as u8, "byte {}", i);
+        }
+        // Completion latch round-trips through the component spelling.
+        crate::dma_set_completed(3, true);
+        assert!(crate::dma_check_completion(3), "latched");
+        assert!(!crate::dma_check_completion(3), "consumed once");
+        // DTC engine idle: no staged activation.
+        assert!(!crate::dtc_has_pending(), "no DTC staged");
+        assert!(!crate::dtc_has_pending(), "probe is non-consuming");
+    }
+
+
+    #[test]
+    fn ra4m1_component_sci_wdt_rtc() {
+        // SCI/WDT/RTC component polls: status without MMIO decode.
+        let _g = RA_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = crate::system::WasmSystem::new_ra4m1();
+        crate::init_for_test(sys);
+        let sys = crate::sys();
+        // SCI0 idle: TX ready (TDRE+TEND reset-set), RX empty.
+        // (RDR reset value is 0x00; only rx_ready + rx_byte matter.)
+        let s = crate::sci_poll(SCI0_BASE);
+        assert_eq!(s, vec![1, 0, 0x00], "SCI0 idle {:?}", s);
+        // RX inject -> rx_ready + staged byte, guest RDR still intact.
+        assert!(crate::peripherals::ra_sci::sci_rx_inject(sys, SCI0_BASE, b'Z'));
+        let s = crate::sci_poll(SCI0_BASE);
+        assert_eq!(s, vec![1, 1, b'Z' as u32], "RX staged {:?}", s);
+        assert_eq!(sys.p.read(sys, SCI0_BASE + 0x05, 1) & 0xFF, b'Z' as u32, "guest RDR intact");
+        // WDT: TOPS=3 programs the 4096 period (FSP default).
+        const WDT_BASE: u32 = 0x4004_4200;
+        sys.p.write(sys, WDT_BASE + 0x02, 1, 0x03); // WDTCR TOPS=3
+        let w = crate::wdt_poll(WDT_BASE);
+        assert_eq!(w, vec![4096, 4096], "period 4096 {:?}", w);
+        // RTC: BCD calendar shape (reset day/mon + 2026 year).
+        let bcd = crate::rtc_read_bcd();
+        assert_eq!(bcd.len(), 7, "7 BCD bytes {:?}", bcd);
+        assert_eq!((bcd[3], bcd[4], bcd[5], bcd[6]), (1, 1, 0x26, 0x20), "date {:?}", bcd);
+    }
+
+
 }
+

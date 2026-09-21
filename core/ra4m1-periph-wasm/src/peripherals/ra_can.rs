@@ -230,6 +230,91 @@ impl RaCan {
             crate::system::icu_raise_event(sys, self.ev_mtx);
         }
     }
+    /// Component hook: stage one standard-ID TX frame on mailbox `mbox`
+    /// and run it through the normal TX path (self-test loopback when
+    /// the guest armed TSTE+TSTM, MIER-gated events, FIFO when RFE).
+    /// `data` truncates to 8 bytes. Returns the received frame as
+    /// `[id_hi, id_lo, dlc, d0..d7]` (12 words; id split so no u32 is
+    /// lost through the JS number path), or empty when the TX never
+    /// completed (e.g. not in operation mode) or no receiver matched
+    /// (NMLST). Same verdict the MMIO loopback proof asserts.
+    pub fn component_send(&mut self, mbox: u8, id: u32, data: &[u8]) -> Vec<u32> {
+        // Same gate the tick path checks: delivery only in operation mode.
+        if self.canm() != 0 {
+            return Vec::new();
+        }
+        let mb = (mbox as usize) % 32;
+        let n = data.len().min(8);
+        // TX mailbox: clear RECREQ mode bit, program SID + DLC + data.
+        self.mem[MCTL_BASE + mb] &= !(1 << 6);
+        let idw = (id & 0x7FF) << 18;
+        self.mem[MB_BASE + mb * 16..MB_BASE + mb * 16 + 4]
+            .copy_from_slice(&idw.to_le_bytes());
+        self.mem[MB_BASE + mb * 16 + 4] = (n & 0xF) as u8;
+        for (i, &b) in data.iter().take(n).enumerate() {
+            self.mem[MB_BASE + mb * 16 + 6 + i] = b;
+        }
+        self.pending_tx = Some(mb);
+        // Synchronous delivery (same body as the tick path, minus the
+        // NVIC raise: the component caller polls state, and unsolicited
+        // pends would perturb guest IRQ timing).
+        let tx = self.pending_tx.take().expect("staged above");
+        self.sent[tx] = true;
+        if self.test_loopback() {
+            let mut frame = [0u8; 14];
+            frame.copy_from_slice(&self.mem[MB_BASE + tx * 16..MB_BASE + tx * 16 + 14]);
+            // Mirror of loopback_receive without the event raise (see above):
+            // FIFO first, else RECREQ mailbox, else NMLST.
+            if self.rfe() && self.fidcr_match(&frame) {
+                let mut f = [0u8; 16];
+                f[..14].copy_from_slice(&frame);
+                f[14] = (self.ts & 0xFF) as u8;
+                f[15] = (self.ts >> 8) as u8;
+                if self.rx_fifo.len() < CAN_FIFO_DEPTH {
+                    self.rx_fifo.push_back(f);
+                } else {
+                    self.rfmlf = true;
+                    return Vec::new();
+                }
+            } else if let Some(rx) = (0..32).find(|&m| self.is_rx(m)) {
+                for k in 0..14 {
+                    self.mem[MB_BASE + rx * 16 + k] = frame[k];
+                }
+                if self.newdata[rx] {
+                    self.msglost[rx] = true;
+                }
+                self.newdata[rx] = true;
+            } else {
+                self.nmlst = true;
+                return Vec::new();
+            }
+            let sid = (u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) >> 18) & 0x7FF;
+            let dlc = (frame[4] & 0xF) as u32;
+            let mut out = vec![(sid >> 16) & 0xFFFF, sid & 0xFFFF, dlc];
+            for i in 0..8u32 {
+                out.push(if (i as usize) < n { data[i as usize] as u32 } else { 0 });
+            }
+            return out;
+        }
+        Vec::new()
+    }
+    /// Component hook: pop one RX FIFO head as `[id, dlc, d0..d7]`
+    /// (10 words), or empty when the FIFO is empty. Same bytes the
+    /// MB24 + RFPCR=0xFF flow exposes via MMIO.
+    pub fn component_take_rx_fifo(&mut self) -> Vec<u32> {
+        match self.rx_fifo.pop_front() {
+            Some(f) => {
+                let sid = (u32::from_le_bytes([f[0], f[1], f[2], f[3]]) >> 18) & 0x7FF;
+                let dlc = (f[4] & 0xF) as u32;
+                let mut out = vec![sid, dlc];
+                for i in 0..8 {
+                    out.push(f[6 + i] as u32);
+                }
+                out
+            }
+            None => Vec::new(),
+        }
+    }
     fn search_result(&mut self) -> u8 {
         let found = match self.mem[0x853] & 3 {
             0 => (0..32).find(|&m| self.is_rx(m) && self.newdata[m]),

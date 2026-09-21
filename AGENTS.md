@@ -7,8 +7,8 @@
 - Keep going non-stop toward a working end result. Do not stall on questions;
   decide and build. No "limitations" - fix the bus/model until hardware-exact.
 - Every change must keep `cargo test -- --test-threads=1` green in
-  `core/ra4m1-periph-wasm` (currently 120: 37 legacy CPU/system + 83 R4 proofs)
-  and in `core/ra4m1-core` (83 R4 proofs: 82 mirror + EK zero-boot) and
+  `core/ra4m1-periph-wasm` (currently 127: 37 legacy CPU/system + 90 R4 proofs)
+  and in `core/ra4m1-core` (90 R4 proofs: 89 mirror + EK zero-boot) and
   `cargo build` green in the top workspace (Minima only; WiFi is parked).
 - Shared globals (`SYS`, `INSTRUCTION_COUNT`, UART buffer) mean parallel
   `cargo test` flakes (notably LTDC timing). Always verify with
@@ -26,15 +26,19 @@ disk but is excluded from the workspace until its code is ready.
 - `core/ra4m1-periph-wasm/` - the full snapshot (isolated `[workspace]`,
   excluded from the top build). CPU `src/cpu/` is the proven M4F decoder;
   STM32 peripherals remain as reference until their RA replacements land.
-  120 tests must stay green (37 legacy CPU/system + 83 R4 proofs).
+  127 tests must stay green (37 legacy CPU/system + 90 R4 proofs).
 - `core/ra4m1-core/` - the SMALL R4-only core (top-workspace member): same
   CPU + ARM + RA peripherals, NO STM32 code, deps are only
   `wasm-bindgen`+`console_error_panic_hook` (no aes/sha/des/svd/regex/serde).
-  Release WASM is ~288KB vs ~2.1MB for the snapshot core (~7.3x smaller).
-  Its 83 `ra4m1.rs` proofs (82 mirror + EK zero-boot) track the snapshot and must stay green.
-- `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Calls
-  `init_ra4m1()`, uses `WasmCpu::new_ra4m1()`. Depends on `ra4m1-core` only.
-  No STM32 and no ESP32 code may ever link here.
+  Release WASM is ~315KB vs ~2.1MB for the snapshot core (~6.7x smaller).
+  Its 90 `ra4m1.rs` proofs (89 mirror + EK zero-boot) track the snapshot and must stay green.
+- `wasm-minima/` (`uno-r4-minima-wasm`) - the small WASM output. Board
+  class `UnoR4Minima` (APP_BASE=0x4000 load default + `load_firmware_at`
+  for EK, full delegation to the core) + `WasmCpu` + 52 free fns
+  (`board_info`, `gpio_*`, `can_*`, `dma_*`, `dtc_has_pending`,
+  `sci/wdt/rtc` polls, `ssi/spi/i2c_exchange`, all jigs).
+  Depends on `ra4m1-core` only. No STM32 and no ESP32 code may ever
+  link here.
 - `wasm-wifi/` - parked, excluded from workspace members.
 - `crates/wifi-link/` - `WifiModule` trait + `NoWifi` (zero cost). ESP32-S3
   plugs in here later without touching RA4M1.
@@ -45,9 +49,9 @@ disk but is excluded from the workspace until its code is ready.
 ## 2. Build / test
 
 ```bash
-# snapshot core (120 tests, always single-threaded)
+# snapshot core (127 tests, always single-threaded)
 cargo test --manifest-path core/ra4m1-periph-wasm/Cargo.toml --lib -- --test-threads=1
-# small core (83 R4 proofs)
+# small core (90 R4 proofs)
 cargo test --manifest-path core/ra4m1-core/Cargo.toml --lib -- --test-threads=1
 # top workspace (Minima only)
 cargo build --manifest-path Cargo.toml
@@ -245,7 +249,10 @@ GPT->DTC->DAC12 sine proof, `r4aws.bin`), `ra4m1_pwm_ok`, `ra4m1_analogwrite_ok`
 `ra4m1_can1_ok`, `ra4m1_map_dac8`, `ra4m1_dac8_ok`, `ra4m1_map_tsn`,
 `ra4m1_map_slcdc`, `ra4m1_map_kint`, `ra4m1_kint_ok`,
 `ra4m1_map_ssi`, `ra4m1_ssi_ok`, `ra4m1_matrix_ok`, `ra4m1_analog_ok`,
-`ra4m1_mtx_ok`, `ra4m1_softserial_ok`,
+`ra4m1_mtx_ok`, `ra4m1_component_gpio_pins`, `ra4m1_component_can_frame`,
+`ra4m1_component_ssi_bridge`, `ra4m1_component_spi_exchange`,
+`ra4m1_component_i2c_exchange`, `ra4m1_component_dma_queue`,
+`ra4m1_component_sci_wdt_rtc`, `ra4m1_softserial_ok`,
 `ra4m1_rtc_alarm_ok`, `ra4m1_map_can_busoff_recovery`, `ra4m1_can_busoff_ok`,
 `ra4m1_ek_ra4m1_zero_boot_p106_led` (EK target: same silicon, zero-boot, P106).
 `ra4m1_map_ssi1`, `ra4m1_map_gpt_protect_dma`.
@@ -295,10 +302,12 @@ r4sser sources).
 ## 8. Browser demo (`demo/`)
 
 `./demo/build.sh` then `python3 -m http.server -d demo 8901`: three-page
-site (`index.html` demo + `docs.html` + `about.html`) driving the 288KB Minima
-WASM (`WasmCpu` + the `usb_*` / `periph_*` free functions + `spi_set_sd_card`/
-`sd_read_block` for the SD tab + `matrix_trace_take` for the Matrix
-heart runner + `adc_set_channel_value` for the Analog slider). Twenty-six tabs run the vendored firmware
+site (`index.html` demo + `docs.html` + `about.html`) driving the ~315KB Minima
+WASM (`WasmCpu` + `UnoR4Minima` board class + the `usb_*` / `periph_*` /
+`gpio_*` / `can_*` / `dma_*` / `sci/wdt/rtc` polls / `ssi/spi/i2c_exchange`
+free functions + `spi_set_sd_card`/`sd_read_block` for the SD tab +
+`matrix_trace_take` for the Matrix heart runner + `adc_set_channel_value`
+for the Analog slider). Twenty-six tabs run the vendored firmware
 live: Blink (LED + full
 12x16 GPIO grid from PORT, plus a MIPS meter in the stats), Serial (in-page virtual-host enumeration
 with step checklist, hello in the terminal, suspend/resume tail), Echo (bulk-pipe discovery

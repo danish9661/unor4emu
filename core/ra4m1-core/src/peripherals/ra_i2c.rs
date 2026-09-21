@@ -163,6 +163,36 @@ impl RaIic {
         self.stop = true;
         self.raise(sys, 3, 1 << 3); // ERI/SPIE
     }
+    /// Component hook: external-master write-then-read against the
+    /// virtual-EEPROM backing (only address 0x50 answers on the jig
+    /// path; anything else NACKs with empty). First write byte is the
+    /// mem pointer (same as the guest-master expect_ptr flow); the rest
+    /// is data from the pointer. Reads stream from the pointer with
+    /// auto-increment. Guest-master live state (BBSY/pending/flags/
+    /// fabric) is untouched.
+    pub(crate) fn component_exchange(
+        &mut self,
+        addr: u8,
+        write: &[u8],
+        read_len: usize,
+    ) -> Vec<u8> {
+        if addr != SLAVE_ADDR {
+            return Vec::new();
+        }
+        if !write.is_empty() {
+            self.eptr = write[0];
+            for &b in &write[1..] {
+                self.eeprom[self.eptr as usize] = b;
+                self.eptr = self.eptr.wrapping_add(1);
+            }
+        }
+        let mut out = Vec::with_capacity(read_len);
+        for _ in 0..read_len {
+            out.push(self.eeprom[self.eptr as usize]);
+            self.eptr = self.eptr.wrapping_add(1);
+        }
+        out
+    }
     /// Ship the staged ICDRT byte (tick): address match/NACK or data.
     fn ship(&mut self, sys: &System) {
         let b = match self.pending.take() {

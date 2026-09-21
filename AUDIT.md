@@ -11,15 +11,15 @@ Playwright screenshots with a clean console.
 ## Verdict
 
 No — not everything is implemented. But nothing known is broken: both
-suites are green (120 + 83, single-threaded), the demo runs 26 tabs live, and every gap below is enumerated with its
+suites are green (127 + 90, single-threaded), the demo runs 26 tabs live, and every gap below is enumerated with its
 Arduino relevance. The pattern is consistent: everything the Arduino
 core drives on real Minima sketches is modeled and proven; the missing
 pieces are either unused by Arduino or parked platform work (WiFi).
 
 ## Test inventory (all green, `--test-threads=1`)
 
-- Snapshot `core/ra4m1-periph-wasm`: **120** = 37 legacy CPU/system
-  tests + 83 R4 proofs in `src/ra4m1.rs` (boot, EK zero-boot/P106, clock stub, SCI TX,
+- Snapshot `core/ra4m1-periph-wasm`: **127** = 37 legacy CPU/system
+  tests + 90 R4 proofs in `src/ra4m1.rs` (boot, EK zero-boot/P106, clock stub, SCI TX,
   GPT, PORT, MMIO blinky, ADC, DAC, RTC, RTC alarm, DMAC, DTC repeat
   + GPT->DAC firmware + AnalogWave sine firmware, ELC, AGT, CRC/DOC, SCI echo, OPAMP/ACMP,
   dataflash program/erase, OPAMP firmware, CTSU, CTSU mutual +
@@ -32,15 +32,16 @@ pieces are either unused by Arduino or parked platform work (WiFi).
   CAN ok, ITE flags, ICU pin-IRQ, EEPROM firmware, attachInterrupt,
   Serial1 echo, extra channels, RTC firmware, WDT refresh/expire,
   CAN1 + DAC8 + TSN + SLCDC + KINT + SSI + matrix proofs, analog + matrix-heart
-  firmware proofs, RTC alarm +
+  firmware proofs, component GPIO/CAN/SSI/SPI/I2C/DMA/SCI/WDT/RTC proofs, RTC alarm +
   bus-off recovery firmware, Blink boots, Blink toggles).
-- Small core `core/ra4m1-core`: **83** proofs (exact one-for-one mirror
+- Small core `core/ra4m1-core`: **90** proofs (exact one-for-one mirror
   of the snapshot's R4 proofs, incl. ITE flags, USB host-flow helpers,
   HID/suspend firmware proofs, MSC mock-chip proof, DTC repeat, AnalogWave sine firmware,
   CAN errors + bus-off recovery, analog + matrix-heart firmware proofs,
+  component GPIO/CAN/SSI/SPI/I2C/DMA/SCI/WDT/RTC proofs,
   RTC alarm firmware, EK-RA4M1 zero-boot; runs 3-4x faster
   than the snapshot suite).
-- WASM: 288KB release (`uno_r4_minima_wasm_bg.wasm`), no STM32/ESP32.
+- WASM: ~315KB release (`uno_r4_minima_wasm_bg.wasm`), no STM32/ESP32.
 - Demo `demo/`: Blink LED + GPIO grid, Serial enumerate + hello,
   Echo round-trip, Wire master/slave trace, SPI master/slave trace,
   SD init + MBR dump, CAN FIFO trace, EEPROM byte trace, PWM duty,
@@ -51,7 +52,7 @@ pieces are either unused by Arduino or parked platform work (WiFi).
 - Core parity: snapshot vs small-core models differ ONLY in env-gated
   debug logs (`ICULOG`/`EVLOG`/`DMAEVLOG` in both, gated off by default)
   plus snapshot's legacy CPU tests. R4 proofs are one-for-one identical
-  (82/82 + EK boot). No behavioral drift.
+  (89/89 + EK boot). No behavioral drift.
 - Upstream CPU reports in `Documents/stm32 F4/cpu_bug.md`: §11
   (exception live-r13, both cores fixed), §12 (predicated ADD/SUB-imm
   flags, both cores fixed), §14 (MOV-reg T1 flagless, both cores fixed),

@@ -670,6 +670,64 @@ pub fn sd_read_block(block: u32) -> Vec<u8> {
     sd_card().lock().unwrap().read_block(block as usize).unwrap_or_default()
 }
 
+/// the guest master for SD traffic instead of peeking).
+pub fn spi_sd_peek(base: u32) -> Option<u8> {
+    if sd_armed_set().lock().unwrap().contains(&base) {
+        None
+    } else {
+        Some(0xFF)
+    }
+}
+
+
+/// Never consumes the staged byte (guest exchange still shifts it out).
+pub fn spi_slave_peek(ch: usize) -> Option<u8> {
+    for slot in crate::sys().p.peripherals.iter() {
+        if slot.start != 0x4007_2000 && slot.start != 0x4007_2100 {
+            continue;
+        }
+        let c = if slot.start == 0x4007_2000 { 0 } else { 1 };
+        if c != ch {
+            continue;
+        }
+        let mut b = match slot.peripheral.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        if let Some(u) = b
+            .as_any_mut()
+            .downcast_mut::<crate::peripherals::ra_spi::RaSpi>()
+        {
+            return u.slave_peek();
+        }
+        return None;
+    }
+    None
+}
+
+
+/// BBSY/pending/flag moves).
+pub fn i2c_component_exchange(addr: u8, write: &[u8], read_len: usize) -> Vec<u8> {
+    for slot in crate::sys().p.peripherals.iter() {
+        if slot.start != crate::peripherals::ra_i2c::IIC1_BASE {
+            continue;
+        }
+        let mut b = match slot.peripheral.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => return Vec::new(),
+        };
+        if let Some(u) = b
+            .as_any_mut()
+            .downcast_mut::<crate::peripherals::ra_i2c::RaIic>()
+        {
+            return u.component_exchange(addr, write, read_len);
+        }
+        return Vec::new();
+    }
+    Vec::new()
+}
+
+
 /// Test-jig CAN error injection (the virtual wire never errors on its
 /// own): stuff `rx` receive / `tx` transmit errors into CAN0's
 /// counters (EWF/EPF/BOEF + ERI event per EIER, like a real storm).

@@ -233,6 +233,36 @@ pub fn i2c_slave_stop(sys: &WasmSystem, from_ch: usize, ch: usize) {
     });
 }
 
+/// Component hook for attached I2C parts (Wokwi-style onI2CWrite/
+/// onI2CRead): an external master talks to `addr` (7-bit) with a
+/// write-then-read transaction against the virtual EEPROM backing
+/// (0x50 jig path on the Arduino Wire channel IIC1 — the same bytes
+/// the `ra4m1_map_i2c_eeprom` proof moves via guest MMIO).
+/// `write` bytes land from the current EEPROM pointer (first byte =
+/// pointer set, like the guest-master flow); `read_len` bytes stream
+/// back with pointer auto-increment. Returns the reply (empty when
+/// the address NACKs). Guest-master live state is untouched (no
+/// BBSY/pending/flag moves).
+pub fn i2c_component_exchange(addr: u8, write: &[u8], read_len: usize) -> Vec<u8> {
+    for slot in crate::sys().p.peripherals.iter() {
+        if slot.start != crate::peripherals::ra_i2c::IIC1_BASE {
+            continue;
+        }
+        let mut b = match slot.peripheral.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => return Vec::new(),
+        };
+        if let Some(u) = b
+            .as_any_mut()
+            .downcast_mut::<crate::peripherals::ra_i2c::RaIic>()
+        {
+            return u.component_exchange(addr, write, read_len);
+        }
+        return Vec::new();
+    }
+    Vec::new()
+}
+
 // ── Shared SPI bus (master clocks a slave on the other channel) ───────────
 // Returns the byte the selected slave shifted out (None = no slave wired,
 // caller falls back to loopback jig / pulled-up 0xFF).
@@ -284,6 +314,45 @@ pub fn spi_sd_exchange(base: u32, mosi: u8) -> Option<u8> {
     } else {
         None
     }
+}
+
+/// Side-effect-free MISO peek for component polls (Some pulled-up 0xFF
+/// when no slave answers and the loopback jig is off; None when an SD
+/// card is armed — the SD engine is stateful, so components must drive
+/// the guest master for SD traffic instead of peeking).
+pub fn spi_sd_peek(base: u32) -> Option<u8> {
+    if sd_armed_set().lock().unwrap().contains(&base) {
+        None
+    } else {
+        Some(0xFF)
+    }
+}
+
+/// Staged slave reply peek for component polls (None = channel is not
+/// a staged slave; the master path falls through to jig/0xFF).
+/// Never consumes the staged byte (guest exchange still shifts it out).
+pub fn spi_slave_peek(ch: usize) -> Option<u8> {
+    for slot in crate::sys().p.peripherals.iter() {
+        if slot.start != 0x4007_2000 && slot.start != 0x4007_2100 {
+            continue;
+        }
+        let c = if slot.start == 0x4007_2000 { 0 } else { 1 };
+        if c != ch {
+            continue;
+        }
+        let mut b = match slot.peripheral.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        if let Some(u) = b
+            .as_any_mut()
+            .downcast_mut::<crate::peripherals::ra_spi::RaSpi>()
+        {
+            return u.slave_peek();
+        }
+        return None;
+    }
+    None
 }
 
 /// Copy out one 512B virtual-SD block for host-side inspection (empty

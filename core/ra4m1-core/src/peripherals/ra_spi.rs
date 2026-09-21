@@ -60,6 +60,16 @@ impl RaSpi {
     pub(crate) fn is_slave(&self) -> bool {
         self.regs[0x00] & 0x48 == 0x40
     }
+    /// Staged slave reply without consuming it (None = not a staged
+    /// slave or nothing staged). Component polls use this; the guest
+    /// exchange still shifts the byte out via `slave_clock_in`.
+    pub(crate) fn slave_peek(&self) -> Option<u8> {
+        if self.is_slave() {
+            self.tx_staged
+        } else {
+            None
+        }
+    }
     /// Bus master clocks a byte through us: sample MOSI into RDR (overrun
     /// if unread, like HW) and shift out the staged byte (0xFF if none).
     pub(crate) fn slave_clock_in(&mut self, sys: &System, mosi: u8) -> u8 {
@@ -71,6 +81,52 @@ impl RaSpi {
         }
         self.update_irq(sys);
         self.tx_staged.take().unwrap_or(0xFF)
+    }
+    /// Component hook: clock one MOSI byte through this channel and pack
+    /// `[miso, spsr]` (SPSR = live SPRF(b7)+SPTEF(b5)+OVRF(b0), same
+    /// bits the MMIO proof reads at SPDR+0x03). Slave channels (MSTR=0)
+    /// sample MOSI into RDR and shift out the staged byte (0xFF when
+    /// empty); master channels run the normal SD/slave/jig/0xFF MISO
+    /// path. Side effects are exactly one bus clock edge (RDR/SPRF/OVRF
+    /// move like HW); polled firmware still reads its byte via the
+    /// normal SPDR data read.
+    pub fn component_exchange(&mut self, mosi: u8) -> Vec<u32> {
+        let miso = if self.regs[0x00] & (1 << 3) != 0 {
+            // Master path: duplicate the write_sized MISO selection
+            // without consuming SPRF/RDR (component polls must not eat
+            // the guest's byte).
+            self.peek_miso(mosi)
+        } else {
+            // Slave path: same as a bus-master clock edge, but defer
+            // the IRQ raise (runner polls state; see CAN hook rationale).
+            if self.sprf {
+                self.ovrf = true;
+            } else {
+                self.rdr = mosi;
+                self.sprf = true;
+            }
+            self.tx_staged.take().unwrap_or(0xFF)
+        };
+        let spsr = (if self.sprf { 1 << 7 } else { 0 }) | (1 << 5) | if self.ovrf { 1 } else { 0 };
+        vec![miso as u32, spsr as u32]
+    }
+    /// MISO answer for one MOSI byte without touching SPRF/RDR/OVRF.
+    fn peek_miso(&self, mosi: u8) -> u8 {
+        // NOTE: the SD engine is stateful (exchange advances it), so a
+        // true peek is impossible while a card is armed; components that
+        // need SD traffic should drive the guest master instead. With no
+        // card armed this is side-effect-free.
+        if let Some(b) = crate::system::spi_sd_peek(self.base) {
+            return b;
+        }
+        if let Some(b) = crate::system::spi_slave_peek(self.ch) {
+            return b;
+        }
+        if crate::system::sci_spi_loopback(self.base) {
+            mosi
+        } else {
+            0xFF
+        }
     }
 }
 

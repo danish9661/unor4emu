@@ -222,6 +222,11 @@ impl RaWdt {
     pub fn new() -> Option<Box<dyn Peripheral>> {
         Some(Box::new(Self { wdtrr: 0, wdtsr: 0, down: 1_000_000, reload: 1_000_000 }))
     }
+    /// Component poll: `[down, reload]` (ticks remaining + TOPS period).
+    /// Read-only: the countdown itself is untouched.
+    pub fn component_poll(&mut self) -> Vec<u32> {
+        vec![self.down, self.reload]
+    }
 }
 
 impl Peripheral for RaWdt {

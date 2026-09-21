@@ -46,6 +46,12 @@ impl RaPort {
     pub fn new_pfs() -> Option<Box<dyn Peripheral>> {
         Some(Box::new(Self { is_pfs: true, ..Self::default() }))
     }
+    /// True for the PORT-slot instance (owns PDR/PODR/PIDR); the PFS
+    /// instance only retains PmnPFS words. Component hooks must target
+    /// the PORT instance.
+    pub fn is_port(&self) -> bool {
+        !self.is_pfs
+    }
     pub fn read_output(&self, port: u8, pin: u8) -> bool {
         if (port as usize) < 12 && pin < 16 {
             (self.podr[port as usize] >> pin) & 1 != 0

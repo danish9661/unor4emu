@@ -51,6 +51,30 @@ impl RaSsi {
     fn ren(&self) -> bool { self.ssicr & 1 != 0 }
     fn tie(&self) -> bool { self.ssifcr & (1 << 3) != 0 }
     fn rie(&self) -> bool { self.ssifcr & (1 << 2) != 0 }
+    /// Component hook: drain the TX FIFO (words the guest wrote via
+    /// SSIFTDR while TEN runs) and feed `rx` samples into the RX FIFO
+    /// (pattern counter continues after them, same as RFRST sequencing).
+    /// Returns `[tx_drained..., 0xFFFF_FFFF, rx_depth]`: the sentinel
+    /// splits the halves; empty halves are legal. Respects the TEN/REN
+    /// gates (drain/fill only while enabled) and FIFO_DEPTH backpressure
+    /// (excess RX samples drop like overrun data loss); never raises
+    /// TXI/RXI (the runner polls state, and unsolicited NVIC pends would
+    /// perturb guest IRQ timing).
+    pub fn component_exchange(&mut self, rx: &[u32]) -> Vec<u32> {
+        let mut out: Vec<u32> = self.tx.drain(..).collect();
+        out.push(0xFFFF_FFFF);
+        if self.ren() {
+            for &w in rx {
+                if self.rx.len() < FIFO_DEPTH {
+                    self.rx.push_back(w);
+                } else {
+                    break;
+                }
+            }
+        }
+        out.push(self.rx.len() as u32);
+        out
+    }
     fn tde(&self) -> bool { self.tx.is_empty() } // empty flag, like SCI TDRE
     fn rdf(&self) -> bool { !self.rx.is_empty() }
     fn fsr(&self) -> u32 {

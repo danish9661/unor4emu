@@ -26,6 +26,20 @@ impl RaRtc {
         regs[0x0E] = 0x26; regs[0x0F] = 0x20; // 2026 BCD
         Some(Box::new(Self { regs, last_tick: instruction_count() }))
     }
+    /// Component poll: raw BCD calendar bytes
+    /// `[sec, min, hour, day, mon, year_lo, year_hi]` (same values the
+    /// RTC tab renders; no decode needed). Read-only.
+    pub fn component_read_bcd(&mut self) -> Vec<u32> {
+        vec![
+            self.regs[0x02] as u32,
+            self.regs[0x04] as u32,
+            self.regs[0x06] as u32,
+            self.regs[0x0A] as u32,
+            self.regs[0x0C] as u32,
+            self.regs[0x0E] as u32,
+            self.regs[0x0F] as u32,
+        ]
+    }
     fn running(&self) -> bool { self.regs[0x24] & 1 != 0 }
     fn bump(field: &mut u8, top: u32) -> bool {
         // BCD increment with carry out at `top` (60/24/...).

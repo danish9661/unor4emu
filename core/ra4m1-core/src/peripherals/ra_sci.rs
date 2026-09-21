@@ -54,6 +54,16 @@ impl RaSci {
     fn scr(&self) -> u8 { self.regs[0x02] }
     fn ssr(&self) -> u8 { self.regs[0x04] }
     fn set_ssr(&mut self, v: u8) { self.regs[0x04] = v; }
+    /// Component poll: `[tx_ready, rx_ready, rx_byte]` (RDR peeked, not
+    /// consumed — the guest still drains it via its own RDR read).
+    /// Model SSR packing: TDRE b7 + TEND b2 (reset 0x84), RDRF b6
+    /// (set on rx_byte/SPI shift, same bit `update_irq` gates RXI on).
+    pub fn component_poll(&mut self) -> Vec<u32> {
+        let ssr = self.ssr();
+        let tx_ready = if ssr & (1 << 7) != 0 && ssr & (1 << 2) != 0 { 1 } else { 0 };
+        let rx_ready = if ssr & (1 << 6) != 0 { 1 } else { 0 };
+        vec![tx_ready, rx_ready, self.regs[0x05] as u32]
+    }
     /// Clock-synchronous mode (SMR.CM): with SPMR.SSE this is simple-SPI.
     fn spi_mode(&self) -> bool { self.regs[0x00] & 0x80 != 0 }
 
