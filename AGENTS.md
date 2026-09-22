@@ -211,7 +211,7 @@ wasm wrappers can path-depend on it).
   P105 RX IRQ0 via GPT4/GPT5 timers + DMAC0/DMAC1 PCNTR samples + ELC
   GPT_A link + soft_wire jig) are all proven end-to-end on real Arduino
   API with `r4aw`/`r4tone`/`r4sser` bins + `core/blinky/sketches/` sources
-  + demo tabs (25 tabs total).
+  + demo tabs (26 tabs total).
 - Firmware order: bare-metal blinky -> UART echo -> ArduinoCore-renesas
   `Blink.ino` (wraps FSP, runs on the core, only needs register models).
 

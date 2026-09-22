@@ -1,0 +1,153 @@
+# Publish the UNO R4 Minima emulator as an npm package + GitHub release.
+#
+# Manual trigger only: Actions → "Publish npm package" → Run workflow.
+# Inputs: branch to build, version to stamp, release notes. The workflow
+#   1. checks out that branch,
+#   2. builds the release WASM (./demo/build.sh),
+#   3. packs `npm/` (wasm-pack output + vendored r4*.bin firmware) as
+#      `@danish9661/uno-r4-emulator@<version>`,
+#   4. publishes to npmjs + GitHub Package Registry (GPR),
+#   5. creates/updates the GitHub release `v<version>` with the tarball
+#      and the demo `pkg/` attached.
+#
+# Required repo secrets: NPM_TOKEN (npmjs automation token),
+# GITHUB_TOKEN is provided automatically (release + GPR publish).
+name: Publish npm package
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build and release'
+        required: true
+        default: 'master'
+      version:
+        description: 'Version to publish (e.g. 0.1.0, no leading v)'
+        required: true
+        default: '0.1.0'
+      description:
+        description: 'Release notes (one or two lines)'
+        required: true
+        default: 'UNO R4 Minima emulator build'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Validate version
+        run: |
+          case "${{ inputs.version }}" in
+            *[!0-9.]*) echo "version must be numeric dotted (e.g. 0.1.0)" && exit 1;;
+          esac
+          test -n "${{ inputs.version }}"
+
+      - name: Install Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen-cli (matches Cargo.lock 0.2.128)
+        run: |
+          curl -sSL -o /tmp/wasm-bindgen.tar.gz \
+            https://github.com/rustwasm/wasm-bindgen/releases/download/0.2.128/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/wasm-bindgen.tar.gz -C /tmp
+          echo /tmp/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl >> "$GITHUB_PATH"
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Build demo (release WASM + JS glue + firmware)
+        run: ./demo/build.sh
+
+      - name: Smoke-check demo outputs
+        run: |
+          test -f demo/pkg/uno_r4_minima_wasm_bg.wasm
+          test -f demo/pkg/uno_r4_minima_wasm.js
+          test -f demo/pkg/uno_r4_minima_wasm.d.ts
+          for f in r4blink.bin r4serial.bin r4echo.bin r4wire.bin r4wire1.bin r4spi.bin r4spislv.bin r4sd.bin r4canfifo.bin r4eep.bin r4pwm.bin r4rtc.bin r4ctsu.bin r4hid.bin r4aw.bin r4tone.bin r4sser.bin r4aws.bin r4rtcalm.bin r4canbo.bin r4can1.bin r4dac8.bin r4kint.bin r4ssi.bin r4matrix.bin r4wdtref.bin r4wdtexp.bin r4opamp.bin r4irq.bin r4serial1.bin r4can.bin r4canerr.bin r4dtc.bin r4susp.bin r4analog.bin r4mtx.bin; do
+            test -f demo/fw/$f || (echo "missing demo/fw/$f" && exit 1)
+          done
+
+      - name: Assemble npm package
+        run: |
+          rm -rf npm && mkdir -p npm/fw npm/pkg
+          cp demo/pkg/uno_r4_minima_wasm.js npm/pkg/
+          cp demo/pkg/uno_r4_minima_wasm.d.ts npm/pkg/
+          cp demo/pkg/uno_r4_minima_wasm_bg.wasm npm/pkg/
+          cp demo/pkg/uno_r4_minima_wasm_bg.wasm.d.ts npm/pkg/ 2>/dev/null || true
+          cp demo/fw/r4*.bin npm/fw/
+          cat > npm/package.json <<EOF
+          {
+            "name": "@danish9661/uno-r4-emulator",
+            "version": "${{ inputs.version }}",
+            "description": "${{ inputs.description }}",
+            "type": "module",
+            "main": "pkg/uno_r4_minima_wasm.js",
+            "types": "pkg/uno_r4_minima_wasm.d.ts",
+            "files": ["pkg/", "fw/", "README.md", "LICENSE*"],
+            "repository": {
+              "type": "git",
+              "url": "https://github.com/danish9661/uno-r4-emulator.git"
+            },
+            "keywords": ["arduino", "uno-r4", "ra4m1", "emulator", "wasm", "cortex-m4"],
+            "license": "SEE LICENSE IN README.md"
+          }
+          EOF
+          cp README.md npm/README.md 2>/dev/null || printf '# @danish9661/uno-r4-emulator\n\n%s\n' "${{ inputs.description }}" > npm/README.md
+          node -e "JSON.parse(require('fs').readFileSync('npm/package.json','utf8')); console.log('package.json valid')"
+          ls -la npm npm/pkg npm/fw | head -n 20
+
+      - name: Pack tarball
+        run: |
+          cd npm && npm pack --dry-run 2>&1 | tail -5
+          TARBALL=$(cd npm && npm pack --silent 2>/dev/null | tail -1)
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          mv "npm/$TARBALL" ./package.tgz
+          ls -la package.tgz
+
+      - name: Publish to npmjs
+        run: |
+          cd npm
+          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to GitHub Package Registry
+        run: |
+          cd npm
+          npm logout 2>/dev/null || true
+          echo "@danish9661:registry=https://npm.pkg.github.com" > .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" >> .npmrc
+          npm publish --access public --registry https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          target_commitish: ${{ inputs.branch }}
+          name: v${{ inputs.version }} — @danish9661/uno-r4-emulator
+          body: ${{ inputs.description }}
+          files: |
+            package.tgz
+            demo/pkg/uno_r4_minima_wasm_bg.wasm
+            demo/pkg/uno_r4_minima_wasm.js
+            demo/pkg/uno_r4_minima_wasm.d.ts

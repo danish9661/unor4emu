@@ -1,4 +1,7 @@
-# unor4api.md — Arduino UNO R4 Minima (`unor4emu`, no npm yet) API + OpenHW gap spec
+# unor4api.md — Arduino UNO R4 Minima (`@danish9661/uno-r4-emulator`) API + OpenHW gap spec
+
+Repo: `https://github.com/danish9661/uno-r4-emulator` · live demo via
+GitHub Pages (workflow `Deploy demo to GitHub Pages` publishes `demo/`).
 
 Probed live from the built glue (`demo/pkg/uno_r4_minima_wasm.d.ts`:
 2 classes + 52 free fns, `wasm-bindgen` 0.2.128), `demo/app.js` (1685 lines),
